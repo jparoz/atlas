@@ -3,14 +3,16 @@ use std::fmt::{self, Display};
 use std::path::Path;
 use std::{fs, io};
 
-use tree_sitter::{Parser, Tree};
+use tree_sitter::Parser;
+
+use crate::lua_file::LuaFile;
 
 /// A struct representing a typechecking context.
 /// That is, all the files containing code to be typechecked,
 /// and all needed state and bookkeeping to return useful type information.
 pub struct Typechecker {
     parser: Parser,
-    files: HashMap<FileID, (Tree, String)>,
+    files: HashMap<FileID, LuaFile>,
 }
 
 impl Typechecker {
@@ -29,6 +31,7 @@ impl Typechecker {
     /// Includes a Lua file into the typechecking context.
     pub fn include<P: AsRef<Path>>(&mut self, path: &P) -> Result<(), IncludeError> {
         let id = FileID::from(&path);
+
         let contents = fs::read_to_string(path)?;
         let tree = self
             .parser
@@ -40,31 +43,28 @@ impl Typechecker {
             log::warn!("Syntax error");
         }
 
+        let file = LuaFile::new(tree, contents);
+
         // @Todo: check if we overwrote an entry here
-        self.files.insert(id, (tree, contents));
+        self.files.insert(id, file);
 
         Ok(())
     }
 
     /// Given a file, line (0-based), and column (0-based),
     /// return the type of the AST node at that point.
-    pub fn type_at_point(
-        &self,
-        file: FileID,
-        row: usize,
-        column: usize,
-    ) -> Result<Type, QueryError> {
-        let (tree, src) = self
+    pub fn type_at_point(&self, id: FileID, row: usize, column: usize) -> Result<Type, QueryError> {
+        let LuaFile { tree, src, .. } = self
             .files
-            .get(&file)
-            .ok_or_else(|| QueryError::FileNotIncluded(file.clone()))?;
+            .get(&id)
+            .ok_or_else(|| QueryError::FileNotIncluded(id.clone()))?;
         let root = tree.root_node();
 
         let point = tree_sitter::Point { row, column };
 
         let smallest_node = root
             .named_descendant_for_point_range(point, point)
-            .ok_or_else(|| QueryError::PointNotFound(point, file.clone()))?;
+            .ok_or_else(|| QueryError::PointNotFound(point, id.clone()))?;
         let node_type = smallest_node.kind();
         log::trace!("Found smallest node at point {point}, node type `{node_type}`");
 
@@ -87,13 +87,24 @@ impl Typechecker {
         }
 
         log::error!("Couldn't find a typeable parent node!");
-        Err(QueryError::NotTypeable(point, file))
+        Err(QueryError::NotTypeable(point, id))
     }
 }
 
 impl Default for Typechecker {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+impl fmt::Debug for Typechecker {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        f.debug_struct("Typechecker")
+            .field(
+                "files",
+                &self.files.keys().map(|id| &id.0).collect::<Vec<_>>(),
+            )
+            .finish_non_exhaustive()
     }
 }
 
