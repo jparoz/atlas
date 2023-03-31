@@ -28,6 +28,8 @@ fn main() {
         .type_at_point(id, args.line, args.column)
         .unwrap();
     println!("Type: {typ:?}");
+
+    log::info!("Typechecker at the end of program:\n{typechecker:?}");
 }
 
 /// Typechecker for vanilla Lua without annotations

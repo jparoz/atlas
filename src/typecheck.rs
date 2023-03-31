@@ -3,7 +3,7 @@ use std::fmt::{self, Display};
 use std::path::Path;
 use std::{fs, io};
 
-use tree_sitter::Parser;
+use tree_sitter::{Node, Parser};
 
 use crate::lua_file::LuaFile;
 
@@ -79,15 +79,53 @@ impl Typechecker {
                     &src[node.byte_range()]
                 );
 
-                // @XXX @Todo: actual typechecking
-                log::warn!("@Todo: actual typechecking");
-                return Ok(Type::Unknown);
+                return Ok(self.type_of_node(node));
             }
             the_node = node.parent();
         }
 
         log::error!("Couldn't find a typeable parent node!");
         Err(QueryError::NotTypeable(point, id))
+    }
+
+    /// Find the type of a node.
+    fn type_of_node(&self, node: Node) -> Type {
+        debug_assert!(is_typeable(node));
+        match node.kind() {
+            // Primitive types
+            "nil" => Type::Nil,
+            "true" | "false" => Type::Boolean,
+            "number" => Type::Number,
+            "string" => Type::String,
+
+            // Tables
+            "table" => todo!(),
+
+            // Other expressions
+            "expression" | "variable" | "binary_expression" => todo!(),
+
+            // Assignments
+            "variable_assignment" | "local_variable_declaration" => todo!(),
+
+            // Functions
+            "function_definition_statement"
+            | "local_function_definition_statement"
+            | "function_definition" => self.type_of_function_body(node),
+
+            _ => unreachable!("previously asserted that this node `is_typeable`"),
+        }
+    }
+
+    /// Find the type of a function body.
+    fn type_of_function_body(&self, node: Node) -> Type {
+        log::trace!("Finding Lua type of node with node type: {}", node.kind());
+
+        let params = node.child_by_field_name("parameters").unwrap();
+        let body = node.child_by_field_name("body").unwrap();
+
+        log::debug!("params: {}", params.to_sexp());
+        log::debug!("body: {}", body.to_sexp());
+        todo!()
     }
 }
 
@@ -110,7 +148,7 @@ impl fmt::Debug for Typechecker {
 
 /// Takes a tree-sitter node,
 /// and returns whether or not the node represents a Lua value which has a type.
-fn is_typeable(node: tree_sitter::Node) -> bool {
+fn is_typeable(node: Node) -> bool {
     matches!(
         node.kind(),
         "function_definition_statement"
