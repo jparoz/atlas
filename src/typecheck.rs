@@ -5,7 +5,7 @@ use std::{fs, io};
 
 use tree_sitter::{Node, Parser};
 
-use crate::lua_file::LuaFile;
+use crate::lua_file::{Environment, LuaFile};
 
 /// A struct representing a typechecking context.
 /// That is, all the files containing code to be typechecked,
@@ -43,7 +43,12 @@ impl Typechecker {
             log::warn!("Syntax error");
         }
 
+        log::debug!("parsed:\n{}", tree.root_node().to_sexp());
+
         let file = LuaFile::new(tree, contents);
+        // @Cleanup: use a helper function instead of using Environment directly
+        let types = Environment::new(&file).types;
+        log::debug!("type environment: {:#?}", types);
 
         // @Todo: check if we overwrote an entry here
         self.files.insert(id, file);
@@ -187,7 +192,7 @@ impl<P: AsRef<Path>> From<&P> for FileID {
     }
 }
 
-#[derive(Debug)]
+#[derive(Debug, Default, Clone)]
 pub enum Type {
     // Basic scalar types
     Nil,
@@ -206,6 +211,8 @@ pub enum Type {
     FullUserdata,
 
     // Pseudo-types
+    Uninitialized,
+    #[default]
     Unknown,
 }
 
