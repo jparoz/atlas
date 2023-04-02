@@ -47,8 +47,8 @@ impl Typechecker {
 
         let file = LuaFile::new(tree, contents);
         // @Cleanup: use a helper function instead of using Environment directly
-        let types = Environment::new(&file).types;
-        log::debug!("type environment: {:#?}", types);
+        let scopes = Environment::new(&file).scopes;
+        log::debug!("type environment: {:#?}", scopes);
 
         // @Todo: check if we overwrote an entry here
         self.files.insert(id, file);

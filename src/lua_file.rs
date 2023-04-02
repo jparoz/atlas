@@ -23,13 +23,13 @@ impl LuaFile {
 
     /// Find the type of an expression,
     /// given a type scope.
-    pub fn type_of_expression(&self, scope: &HashMap<String, Type>, node: Node) -> Type {
+    pub fn type_of_expression(&self, scope: &HashMap<String, Type>, expr: Node) -> Type {
         log::trace!(
             "Finding type of expression `{}`",
-            &self.src[node.byte_range()]
+            &self.src[expr.byte_range()]
         );
 
-        match node.kind() {
+        match expr.kind() {
             // Primitive types
             "nil" => Type::Nil,
             "true" | "false" => Type::Boolean,
@@ -39,7 +39,7 @@ impl LuaFile {
             // Variable references
             "variable" => {
                 // @Todo: lookup globals as well
-                let var_str = &self.src[node.byte_range()];
+                let var_str = &self.src[expr.byte_range()];
                 scope.get(var_str).cloned().unwrap_or_default()
             }
 
@@ -56,7 +56,7 @@ impl LuaFile {
             "call" => Type::Unknown,
 
             "parenthesized_expression" => {
-                self.type_of_expression(scope, node.named_child(0).expect("non-optional"))
+                self.type_of_expression(scope, expr.named_child(0).expect("non-optional"))
             }
 
             // @Todo: probably need a specific type for varargs;
@@ -65,16 +65,61 @@ impl LuaFile {
             // but a bit different to both.
             "vararg_expression" => todo!(),
 
-            // @Todo: fill these out.
-            // All operators are known ahead of time;
-            // need to include their default types,
-            // and eventually need to check for metatables somehow
-            // (which might change the operator's effective type).
-            "unary_expression" => todo!(),
-            "binary_expression" => todo!(),
+            // @Todo: handle metatables
+            // @Todo: check the type of the operand (here? or elsewhere?)
+            "unary_expression" => {
+                let operator = expr.child_by_field_name("operator").expect("non-optional");
+                match &self.src[operator.byte_range()] {
+                    // number
+                    "-" | "#" => Type::Number,
+
+                    // integer
+                    // @Todo: not Type::Number
+                    "~" => Type::Number,
+
+                    // bool
+                    "not" => Type::Boolean,
+
+                    _ => unreachable!(),
+                }
+            }
+
+            // @Todo: handle metatables
+            // @Todo: check the type of the operands (here? or elsewhere?)
+            "binary_expression" => {
+                let operator = expr.child_by_field_name("operator").expect("non-optional");
+                match &self.src[operator.byte_range()] {
+                    // number
+                    "+" | "-" | "*" | "//" | "%" => Type::Number,
+
+                    // float
+                    "/" | "^" => Type::Number,
+
+                    // bool
+                    "==" | "~=" | "<" | ">" | "<=" | ">=" => Type::Boolean,
+
+                    // short-circuiting
+                    // @XXX @Todo @Fixme: not always boolean
+                    "or" | "and" => Type::Boolean,
+
+                    // integer
+                    // @Todo: not Type::Number
+                    "|" | "~" | "&" | "<<" | ">>" => Type::Number,
+
+                    // string
+                    ".." => Type::String,
+
+                    _ => unreachable!(),
+                }
+            }
 
             _ => unreachable!("should have covered all types of expression"),
         }
+    }
+
+    pub fn type_of_function(&self, function_body: Node) -> Type {
+        // @XXX @Todo: make this return a properly parameterised and inferred type
+        Type::Function
     }
 }
 
@@ -88,7 +133,7 @@ pub struct Environment<'a> {
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the type environment at that node.
     /// The IDs used are from the `LuaFile`'s `tree` field.
-    pub types: HashMap<usize, HashMap<String, Type>>,
+    pub scopes: HashMap<usize, HashMap<String, Type>>,
 }
 
 impl<'a> Environment<'a> {
@@ -97,7 +142,7 @@ impl<'a> Environment<'a> {
         let mut env = Environment {
             file,
             local_scope: HashMap::new(),
-            types: HashMap::new(),
+            scopes: HashMap::new(),
         };
         env.type_block(file.tree.root_node());
         env
@@ -111,7 +156,7 @@ impl<'a> Environment<'a> {
         for statement in block.children(&mut cursor) {
             // Save the current state of the type environment.
             log::trace!("local scope:\n{:?}", self.local_scope);
-            self.types.insert(statement.id(), self.local_scope.clone());
+            self.scopes.insert(statement.id(), self.local_scope.clone());
 
             log::trace!(
                 "Processing statement (kind == {kind}):\n{src}",
@@ -123,12 +168,18 @@ impl<'a> Environment<'a> {
                 // @Todo: global environment
                 // @Note: This could either be assigning a global,
                 // or modifying a previously-declared local.
-                "variable_assignment" => todo!(),
+                "variable_assignment" => {
+                    let var_list = statement.named_child(0).expect("non-optional");
+                    let expr_list = statement.named_child(1).expect("non-optional");
+                    self.assign(var_list, expr_list);
+                }
 
                 "local_variable_declaration" => {
                     let var_list = statement.named_child(0).expect("non-optional");
-                    let expr_list = statement.named_child(1);
-                    self.assign(var_list, expr_list);
+                    self.declare_local(var_list);
+                    if let Some(expr_list) = statement.named_child(1) {
+                        self.assign(var_list, expr_list);
+                    }
                 }
 
                 "do_statement" => {
@@ -239,7 +290,7 @@ impl<'a> Environment<'a> {
                         .child_by_field_name("right")
                         .expect("non-optional");
 
-                    self.assign(var_list, Some(expr_list));
+                    self.assign(var_list, expr_list);
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -293,9 +344,22 @@ impl<'a> Environment<'a> {
                     }
                 }
 
-                // @Todo: function definition statements
-                "function_definition_statement" => todo!(),
-                "local_function_definition_statement" => todo!(),
+                "function_definition_statement" => {
+                    let name = statement.named_child(0).expect("non-optional");
+                    let function = statement.named_child(1).expect("non-optional");
+
+                    // @Todo @Fixme: change this to accept table type names,
+                    // e.g. `function foo.bar:baz() body end`
+                    self.assign(name, function);
+                }
+
+                "local_function_definition_statement" => {
+                    let name = statement.named_child(0).expect("non-optional");
+                    let function = statement.named_child(1).expect("non-optional");
+
+                    self.declare_local(name);
+                    self.assign(name, function);
+                }
 
                 // Ignore these, as they don't (visibly) change the type environment.
                 "shebang" | "call" | "empty_statement" | "label_statement" | "goto_statement" => (),
@@ -350,27 +414,40 @@ impl<'a> Environment<'a> {
         todo!("@Todo: implement this after changing Type to handle multiple return values")
     }
 
-    /// Adds variables to the local scope representing a Lua assignment.
-    fn assign(&mut self, var_list: Node<'a>, expr_list: Option<Node<'a>>) {
+    /// Adds the given variables to the local scope
+    /// (with the uninitialized type).
+    ///
+    /// As in, `local foo`.
+    fn declare_local(&mut self, var_list: Node<'a>) {
+        let names = self.list(var_list);
+        self.local_scope
+            .extend(names.into_iter().zip(iter::repeat(Type::Uninitialized)));
+    }
+
+    /// Assigns the given variables to have the types according to the given expressions.
+    /// If there are more variables than expressions,
+    /// the extra variables are left untouched;
+    /// if there are more expressions than variables,
+    /// the extra expressions are ignored.
+    ///
+    /// As in, `foo, bar, baz = 1, 3`.
+    fn assign(&mut self, var_list: Node<'a>, expr_list: Node<'a>) {
         let names = self.list(var_list);
 
-        let mut expr_cursor = expr_list.map(|node| node.walk());
+        let mut expr_cursor = expr_list.walk();
 
-        #[allow(clippy::needless_collect)]
         let types: Vec<Type> = expr_list
-            .map(|values_node| {
-                values_node
-                    .children_by_field_name("value", expr_cursor.as_mut().unwrap())
-                    .map(|value_node| self.file.type_of_expression(&self.local_scope, value_node))
-            })
+            .children_by_field_name("value", &mut expr_cursor)
+            .map(|value_node| self.file.type_of_expression(&self.local_scope, value_node))
             .into_iter()
-            .flatten()
             .collect();
 
-        self.local_scope.extend(
-            names
-                .into_iter()
-                .zip(types.into_iter().chain(iter::repeat(Type::Uninitialized))),
-        );
+        // @Todo @Fixme:
+        // If the variable isn't already in the local_scope,
+        // instead of assigning it there anyway,
+        // we should add it to the global table
+        // (or the equivalent _ENV nonsense).
+        self.local_scope
+            .extend(names.into_iter().zip(types.into_iter()));
     }
 }
