@@ -468,7 +468,10 @@ impl TypedFile {
             "call" => vec![Type::Unknown],
 
             "parenthesized_expression" => {
-                self.typecheck_expression(expr.named_child(0).expect("non-optional"))
+                let mut types =
+                    self.typecheck_expression(expr.named_child(0).expect("non-optional"));
+                types.truncate(1);
+                types
             }
 
             // @Todo: probably need a specific type for varargs;
