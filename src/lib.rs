@@ -1,2 +1,2 @@
-pub mod lua_file;
+pub mod error;
 pub mod typecheck;
