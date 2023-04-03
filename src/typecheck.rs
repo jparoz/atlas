@@ -146,7 +146,7 @@ impl TypedFile {
 
     /// Builds the type environment in a block.
     /// Returns the return type of the block.
-    fn typecheck_block(&mut self, block: Node) -> Type {
+    fn typecheck_block(&mut self, block: Node) -> Vec<Type> {
         // For each statement,
         // build the type environment at that point.
         let mut cursor = block.walk();
@@ -168,14 +168,14 @@ impl TypedFile {
                 "variable_assignment" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     let expr_list = statement.named_child(1).expect("non-optional");
-                    self.assign(var_list, expr_list);
+                    self.assign(var_list, self.explist(expr_list));
                 }
 
                 "local_variable_declaration" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     self.declare_local(var_list);
                     if let Some(expr_list) = statement.named_child(1) {
-                        self.assign(var_list, expr_list);
+                        self.assign(var_list, self.explist(expr_list));
                     }
                 }
 
@@ -287,7 +287,7 @@ impl TypedFile {
                         .child_by_field_name("right")
                         .expect("non-optional");
 
-                    self.assign(var_list, expr_list);
+                    self.assign(var_list, self.explist(expr_list));
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -341,61 +341,57 @@ impl TypedFile {
                 }
 
                 "function_definition_statement" => {
-                    let name = statement.named_child(0).expect("non-optional");
-                    let function = statement.named_child(1).expect("non-optional");
+                    let name = statement.child_by_field_name("name").expect("non-optional");
+                    let function_type = self.typecheck_function(statement);
 
                     // @Todo @Fixme: change this to accept table type names,
                     // e.g. `function foo.bar:baz() body end`
-                    self.assign(name, function);
+                    self.assign(name, [function_type]);
                 }
 
                 "local_function_definition_statement" => {
-                    let name = statement.named_child(0).expect("non-optional");
-                    let function = statement.named_child(1).expect("non-optional");
+                    let name = statement.child_by_field_name("name").expect("non-optional");
+                    let function_type = self.typecheck_function(statement);
 
                     self.declare_local(name);
-                    self.assign(name, function);
+                    self.assign(name, vec![function_type]);
                 }
 
-                // Ignore these, as they don't (visibly) change the type environment.
-                "shebang" | "call" | "empty_statement" | "label_statement" | "goto_statement" => (),
-
-                // @Todo @Checkme: can/should we do an early return here?
+                // @Todo @Checkme: should we do an early return here?
                 // Code after a `break` is unreachable,
                 // so anything in that unreachable code doesn't really have a type anyway.
                 // @Todo: emit a warning about any unreachable code after this break.
-                // @XXX @Todo @Fixme
-                "break_statement" => return todo!(),
+                // @Todo: check if we're inside a loop (?)
+                "break_statement" => return vec![],
 
-                // @Todo: the type of this return statement
-                // is sort of the type of the containing block;
-                // We should probably do something with this.
-                //
                 // @Note: it's actually a syntax error to have code after this return statement;
                 // currently we do an early return of this function,
                 // but possibly we could still check some stuff after the return statement.
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
-                        // @Todo: do something with this
-                        log::debug!("returned: `{}`", &self.src[exp_list.byte_range()])
+                        return self.explist(exp_list);
+                    } else {
+                        return vec![];
                     }
-
-                    // @XXX
-                    return Type::Unknown;
                 }
+
+                // Ignore these, as they don't (visibly) change the type environment.
+                "shebang" | "call" | "empty_statement" | "label_statement" | "goto_statement" => (),
 
                 _ => unreachable!("covered all statement types"),
             }
         }
 
         // If we're here,
-        // we didn't have any return statement;
-        // so the return type of the block is nil.
-        Type::Nil
+        // we didn't have any return statement.
+        vec![]
     }
 
     /// Typecheck an expression.
-    pub fn typecheck_expression(&self, expr: Node) -> Type {
+    /// Note that an expression may be a multiple return
+    /// (e.g. from a function call or varargs expression),
+    /// so this function returns a `Vec<Type>`.
+    pub fn typecheck_expression(&self, expr: Node) -> Vec<Type> {
         log::trace!(
             "Finding type of expression `{}`",
             &self.src[expr.byte_range()]
@@ -403,29 +399,29 @@ impl TypedFile {
 
         match expr.kind() {
             // Primitive types
-            "nil" => Type::Nil,
-            "true" | "false" => Type::Boolean,
-            "number" => Type::Number,
-            "string" => Type::String,
+            "nil" => vec![Type::Nil],
+            "true" | "false" => vec![Type::Boolean],
+            "number" => vec![Type::Number],
+            "string" => vec![Type::String],
 
             // Variable references
             "variable" => {
                 // @Todo: lookup globals as well
                 let var_str = &self.src[expr.byte_range()];
-                self.local_scope.get(var_str).cloned().unwrap_or_default()
+                vec![self.local_scope.get(var_str).cloned().unwrap_or_default()]
             }
 
             // Tables
-            "table" => Type::Table,
+            "table" => vec![Type::Table],
 
             // Functions
-            "function_definition" => self.typecheck_function(expr),
+            "function_definition" => vec![self.typecheck_function(expr)],
 
             // @Todo @XXX:
             // Lookup the type of the function/object being called,
             // check the argument types (?),
             // and return the return type.
-            "call" => Type::Unknown,
+            "call" => vec![Type::Unknown],
 
             "parenthesized_expression" => {
                 self.typecheck_expression(expr.named_child(0).expect("non-optional"))
@@ -443,14 +439,14 @@ impl TypedFile {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "-" | "#" => Type::Number,
+                    "-" | "#" => vec![Type::Number],
 
                     // integer
                     // @Todo: not Type::Number
-                    "~" => Type::Number,
+                    "~" => vec![Type::Number],
 
                     // bool
-                    "not" => Type::Boolean,
+                    "not" => vec![Type::Boolean],
 
                     _ => unreachable!(),
                 }
@@ -462,24 +458,24 @@ impl TypedFile {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "+" | "-" | "*" | "//" | "%" => Type::Number,
+                    "+" | "-" | "*" | "//" | "%" => vec![Type::Number],
 
                     // float
-                    "/" | "^" => Type::Number,
+                    "/" | "^" => vec![Type::Number],
 
                     // bool
-                    "==" | "~=" | "<" | ">" | "<=" | ">=" => Type::Boolean,
+                    "==" | "~=" | "<" | ">" | "<=" | ">=" => vec![Type::Boolean],
 
                     // short-circuiting
                     // @XXX @Todo @Fixme: not always boolean
-                    "or" | "and" => Type::Boolean,
+                    "or" | "and" => vec![Type::Boolean],
 
                     // integer
                     // @Todo: not Type::Number
-                    "|" | "~" | "&" | "<<" | ">>" => Type::Number,
+                    "|" | "~" | "&" | "<<" | ">>" => vec![Type::Number],
 
                     // string
-                    ".." => Type::String,
+                    ".." => vec![Type::String],
 
                     _ => unreachable!(),
                 }
@@ -491,8 +487,12 @@ impl TypedFile {
 
     /// Typecheck a function (either a [local] definition or an anonymous function expression).
     pub fn typecheck_function(&self, function_body: Node) -> Type {
-        let params = function_body.child_by_field_name("parameters").unwrap();
-        let body = function_body.child_by_field_name("body").unwrap();
+        let params = function_body
+            .child_by_field_name("parameters")
+            .expect("non-optional");
+        let body = function_body
+            .child_by_field_name("body")
+            .expect("non-optional");
 
         log::debug!("params: {}", params.to_sexp());
         log::debug!("body: {}", body.to_sexp());
@@ -522,8 +522,23 @@ impl TypedFile {
     /// the explist `foo(), 3, true, foo()`
     /// (where `foo` has return type `number, string`),
     /// will be evaluated to have the type `number, number, bool, number, string`.
-    fn explist(&self, list: Node) {
-        todo!("@Todo: implement this after changing Type to handle multiple return values")
+    fn explist(&self, list: Node) -> Vec<Type> {
+        let mut types = Vec::new();
+
+        let count = list.named_child_count();
+        let mut cursor = list.walk();
+        list.named_children(&mut cursor)
+            .map(|expr| self.typecheck_expression(expr))
+            .enumerate()
+            .for_each(|(i, mut ts)| {
+                if i + 1 < count {
+                    types.push(ts.swap_remove(0))
+                } else {
+                    types.extend(ts)
+                }
+            });
+
+        types
     }
 
     /// Adds the given variables to the local scope
@@ -543,17 +558,11 @@ impl TypedFile {
     /// the extra expressions are ignored.
     ///
     /// As in, `foo, bar, baz = 1, 3`.
-    fn assign(&mut self, var_list: Node, expr_list: Node) {
+    fn assign<I>(&mut self, var_list: Node, types: I)
+    where
+        I: IntoIterator<Item = Type>,
+    {
         let names = self.list(var_list);
-
-        let mut expr_cursor = expr_list.walk();
-
-        #[allow(clippy::needless_collect)]
-        let types: Vec<Type> = expr_list
-            .children_by_field_name("value", &mut expr_cursor)
-            .map(|value_node| self.typecheck_expression(value_node))
-            .into_iter()
-            .collect();
 
         // @Todo @Fixme:
         // If the variable isn't already in the local_scope,
