@@ -755,7 +755,7 @@ impl Display for Type {
             Function { arguments, returns } => {
                 write!(
                     f,
-                    "({args}) -> {returns}",
+                    "(({args}) -> {returns})",
                     args = arguments.iter().join(", ")
                 )
             }
