@@ -41,6 +41,8 @@ impl Typechecker {
             .parse(&contents, None)
             .ok_or(IncludeError::ParseTimeout)?;
 
+        log::trace!("Parsed:\n{}", tree.root_node().to_sexp());
+
         if tree.root_node().has_error() {
             // @Todo: something more? Print the node/s containing the error/s?
             log::warn!("Syntax error");
