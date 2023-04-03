@@ -130,6 +130,11 @@ pub struct TypedFile {
     /// to the type environment at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedFile::new`].
     pub scopes: HashMap<usize, HashMap<String, Type>>,
+
+    /// A map from a tree-sitter [`Node`]'s ID
+    /// to the types of the expression at that node.
+    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedFile::new`].
+    pub types: HashMap<usize, Vec<Type>>,
 }
 
 impl TypedFile {
@@ -139,6 +144,7 @@ impl TypedFile {
             src,
             local_scope: HashMap::new(),
             scopes: HashMap::new(),
+            types: HashMap::new(),
         };
         env.typecheck_block(tree.root_node());
         env
@@ -168,14 +174,16 @@ impl TypedFile {
                 "variable_assignment" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     let expr_list = statement.named_child(1).expect("non-optional");
-                    self.assign(var_list, self.explist(expr_list));
+                    let types = self.explist(expr_list);
+                    self.assign(var_list, types);
                 }
 
                 "local_variable_declaration" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     self.declare_local(var_list);
                     if let Some(expr_list) = statement.named_child(1) {
-                        self.assign(var_list, self.explist(expr_list));
+                        let types = self.explist(expr_list);
+                        self.assign(var_list, types);
                     }
                 }
 
@@ -196,8 +204,8 @@ impl TypedFile {
                     let condition = statement
                         .child_by_field_name("condition")
                         .expect("non-optional");
-                    let condition_type = self.typecheck_expression(condition);
-                    // @Todo: something with condition_type
+                    let condition_types = self.typecheck_expression(condition);
+                    // @Todo: something with condition_types
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -287,7 +295,8 @@ impl TypedFile {
                         .child_by_field_name("right")
                         .expect("non-optional");
 
-                    self.assign(var_list, self.explist(expr_list));
+                    let types = self.explist(expr_list);
+                    self.assign(var_list, types);
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -391,13 +400,13 @@ impl TypedFile {
     /// Note that an expression may be a multiple return
     /// (e.g. from a function call or varargs expression),
     /// so this function returns a `Vec<Type>`.
-    pub fn typecheck_expression(&self, expr: Node) -> Vec<Type> {
+    pub fn typecheck_expression(&mut self, expr: Node) -> Vec<Type> {
         log::trace!(
             "Finding type of expression `{}`",
             &self.src[expr.byte_range()]
         );
 
-        match expr.kind() {
+        let types = match expr.kind() {
             // Primitive types
             "nil" => vec![Type::Nil],
             "true" | "false" => vec![Type::Boolean],
@@ -482,7 +491,12 @@ impl TypedFile {
             }
 
             _ => unreachable!("should have covered all types of expression"),
-        }
+        };
+
+        // @Todo: check for clashes
+        self.types.insert(expr.id(), types.clone());
+
+        types
     }
 
     /// Typecheck a function (either a [local] definition or an anonymous function expression).
@@ -522,7 +536,7 @@ impl TypedFile {
     /// the explist `foo(), 3, true, foo()`
     /// (where `foo` has return type `number, string`),
     /// will be evaluated to have the type `number, number, bool, number, string`.
-    fn explist(&self, list: Node) -> Vec<Type> {
+    fn explist(&mut self, list: Node) -> Vec<Type> {
         let mut types = Vec::new();
 
         let count = list.named_child_count();
