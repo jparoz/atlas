@@ -13,5 +13,6 @@ thiserror = "1.0"
 log = "0.4"
 env_logger = "0.9"
 im = "15.1"
+itertools = "0.10"
 # serde = { version = "1.0", features = ["derive"] }
 # serde_yaml = "0.9"
