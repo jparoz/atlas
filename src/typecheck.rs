@@ -472,6 +472,8 @@ impl ChunkBuilder {
                 let var_str = &self.src[expr.byte_range()];
                 if let Some(local) = self.local_scope.get(var_str) {
                     vec![local.clone()]
+                } else if let Some(global_defined_here) = self.provided_globals.get(var_str) {
+                    vec![global_defined_here.clone()]
                 } else {
                     // @Todo @XXX: input type variables??
                     let typ = Type::Unknown;
