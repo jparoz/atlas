@@ -120,30 +120,14 @@ pub struct TypedChunk {
 }
 
 /// Manages the typechecking of a single Lua chunk.
+/// See [`TypedChunk`] for documentation of fields.
 #[derive(Debug, Clone)]
 struct ChunkBuilder {
-    /// The contents of the file as it was read from disk.
-    /// This is the string which was given to the tree-sitter parser to produce the `Tree`.
     src: String,
-
-    /// The current local scope.
     local_scope: im::HashMap<String, Type>,
-
-    /// A map from a tree-sitter [`Node`]'s ID
-    /// to the type environment at that node.
-    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
     scopes: HashMap<usize, im::HashMap<String, Type>>,
-
-    /// A map from a tree-sitter [`Node`]'s ID
-    /// to the types of the expression at that node.
-    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
     types: im::HashMap<usize, TypeList>,
-
-    /// The set of all free variables in the chunk.
-    /// These are usually translated to global variable accesses.
     free_variables: HashMap<String, Type>,
-
-    /// The set of all assigned globals in the chunk.
     provided_globals: HashMap<String, Type>,
 }
 
