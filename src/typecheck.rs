@@ -569,36 +569,36 @@ impl ChunkBuilder {
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
         let saved_scope = self.local_scope.clone();
 
-        let params = function_body
-            .child_by_field_name("parameters")
-            .expect("non-optional");
-
         let mut arguments = Vec::new();
-        let mut cursor = params.walk();
-        for param in params.named_children(&mut cursor) {
-            match param.kind() {
-                "identifier" => {
-                    let name = self.src[param.byte_range()].to_string();
 
-                    // @XXX @Todo: proper argument type checking
-                    let typ = Type::Unknown;
+        if let Some(params) = function_body.child_by_field_name("parameters") {
+            let mut cursor = params.walk();
+            for param in params.named_children(&mut cursor) {
+                match param.kind() {
+                    "identifier" => {
+                        let name = self.src[param.byte_range()].to_string();
 
-                    arguments.push(typ.clone());
-                    log::trace!("Binding function argument `{name}` to type: {typ:?}");
-                    self.declare_local([name.clone()]);
-                    self.assign([name], [typ]);
+                        // @XXX @Todo: proper argument type checking
+                        let typ = Type::Unknown;
+
+                        arguments.push(typ.clone());
+                        log::trace!("Binding function argument `{name}` to type: {typ:?}");
+                        self.declare_local([name.clone()]);
+                        self.assign([name], [typ]);
+                    }
+
+                    "vararg_expression" => todo!(),
+
+                    _ => unreachable!("covered all parameter types"),
                 }
-
-                "vararg_expression" => todo!(),
-
-                _ => unreachable!("covered all parameter types"),
             }
         }
 
-        let body = function_body
-            .child_by_field_name("body")
-            .expect("non-optional");
-        let returns = self.typecheck_block(body);
+        let returns = if let Some(body) = function_body.child_by_field_name("body") {
+            self.typecheck_block(body)
+        } else {
+            PossibleReturnTypes(Vec::new())
+        };
 
         self.local_scope = saved_scope;
 
