@@ -496,8 +496,8 @@ impl ChunkBuilder {
             "call" => vec![Type::Unknown],
 
             "parenthesized_expression" => {
-                let mut types =
-                    self.typecheck_expression(expr.named_child(0).expect("non-optional"));
+                let sub_expr = expr.named_child(0).expect("non-optional");
+                let mut types = self.typecheck_expression(sub_expr);
                 types.truncate(1);
                 types
             }
@@ -542,8 +542,34 @@ impl ChunkBuilder {
                     "==" | "~=" | "<" | ">" | "<=" | ">=" => vec![Type::Boolean],
 
                     // short-circuiting
-                    // @XXX @Todo @Fixme: not always boolean
-                    "or" | "and" => vec![Type::Boolean],
+                    //
+                    // @Note @Fixme:
+                    // These are the expressions
+                    // (along with function calls)
+                    // which mess up the idea that an expression can only have one possible type.
+                    //
+                    // For simplicity,
+                    // for the moment,
+                    // instead of capturing the possibility within an `or` expression
+                    // of having two different types,
+                    // we'll simply type the whole `or` expression
+                    // as having the same type as its second operand;
+                    // and do the same for `and`.
+                    //
+                    // That is,
+                    // the expression `foo or 123`
+                    // is given the type `number`;
+                    // even though a more precise type would be `type(foo) | number`.
+                    // `foo and 123` is given the same type `number`.
+                    //
+                    // This is essentially arbitrary,
+                    // but it's at least sometimes right.
+                    "or" | "and" => {
+                        let right = expr.child_by_field_name("right").expect("non-optional");
+                        let mut types = self.typecheck_expression(right);
+                        types.truncate(1);
+                        types
+                    }
 
                     // integer
                     // @Todo: not Type::Number
