@@ -527,16 +527,18 @@ impl TypedFile {
 
         let count = list.named_child_count();
         let mut cursor = list.walk();
-        list.named_children(&mut cursor)
+
+        for (i, mut ts) in list
+            .named_children(&mut cursor)
             .map(|expr| self.typecheck_expression(expr))
             .enumerate()
-            .for_each(|(i, mut ts)| {
-                if i + 1 < count {
-                    types.push(ts.swap_remove(0))
-                } else {
-                    types.extend(ts)
-                }
-            });
+        {
+            if i + 1 < count {
+                types.push(ts.swap_remove(0))
+            } else {
+                types.extend(ts)
+            }
+        }
 
         types
     }
