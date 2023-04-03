@@ -104,7 +104,7 @@ pub enum Type {
     // Parametric types
     Function {
         arguments: Vec<Type>,
-        returns: Vec<Type>,
+        returns: Vec<TypeList>,
     },
     // @Todo @Fixme @XXX: include some parameters in these lol
     Thread,
@@ -137,7 +137,7 @@ pub struct TypedFile {
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the types of the expression at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedFile::new`].
-    pub types: HashMap<usize, Vec<Type>>,
+    pub types: HashMap<usize, TypeList>,
 }
 
 impl TypedFile {
@@ -154,8 +154,10 @@ impl TypedFile {
     }
 
     /// Builds the type environment in a block.
-    /// Returns the return type of the block.
-    fn typecheck_block(&mut self, block: Node) -> Vec<Type> {
+    /// Returns a list of all the possible return types of the block.
+    fn typecheck_block(&mut self, block: Node) -> Vec<TypeList> {
+        let mut return_types: Vec<TypeList> = Vec::new();
+
         // For each statement,
         // build the type environment at that point.
         let mut cursor = block.walk();
@@ -199,7 +201,8 @@ impl TypedFile {
                     let saved_scope = self.local_scope.clone();
 
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.typecheck_block(body);
+                        let typ = self.typecheck_block(body);
+                        return_types.extend(typ);
                     }
 
                     self.local_scope = saved_scope;
@@ -217,7 +220,8 @@ impl TypedFile {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.typecheck_block(body);
+                        let typ = self.typecheck_block(body);
+                        return_types.extend(typ);
                     }
 
                     self.local_scope = saved_scope;
@@ -228,7 +232,8 @@ impl TypedFile {
 
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.typecheck_block(body);
+                        let typ = self.typecheck_block(body);
+                        return_types.extend(typ);
                     }
 
                     // until
@@ -270,7 +275,8 @@ impl TypedFile {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.typecheck_block(body);
+                        let typ = self.typecheck_block(body);
+                        return_types.extend(typ);
                     }
 
                     self.local_scope = saved_scope;
@@ -310,7 +316,8 @@ impl TypedFile {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.typecheck_block(body);
+                        let typ = self.typecheck_block(body);
+                        return_types.extend(typ);
                     }
 
                     self.local_scope = saved_scope;
@@ -332,7 +339,10 @@ impl TypedFile {
                     // then [consequence]
                     if let Some(consequence) = statement.child_by_field_name("consequence") {
                         let saved_scope = self.local_scope.clone();
-                        self.typecheck_block(consequence);
+
+                        let typ = self.typecheck_block(consequence);
+                        return_types.extend(typ);
+
                         self.local_scope = saved_scope;
                     }
 
@@ -347,13 +357,19 @@ impl TypedFile {
                             // then [consequence]
                             if let Some(consequence) = elseif.child_by_field_name("consequence") {
                                 let saved_scope = self.local_scope.clone();
-                                self.typecheck_block(consequence);
+
+                                let typ = self.typecheck_block(consequence);
+                                return_types.extend(typ);
+
                                 self.local_scope = saved_scope;
                             }
                         // [else [body]]
                         } else if let Some(body) = elseif.child_by_field_name("body") {
                             let saved_scope = self.local_scope.clone();
-                            self.typecheck_block(body);
+
+                            let typ = self.typecheck_block(body);
+                            return_types.extend(typ);
+
                             self.local_scope = saved_scope;
                         }
                     }
@@ -383,17 +399,16 @@ impl TypedFile {
                 // so anything in that unreachable code doesn't really have a type anyway.
                 // @Todo: emit a warning about any unreachable code after this break.
                 // @Todo: check if we're inside a loop (?)
-                "break_statement" => return vec![],
+                "break_statement" => break,
 
                 // @Note: it's actually a syntax error to have code after this return statement;
                 // currently we do an early return of this function,
                 // but possibly we could still check some stuff after the return statement.
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
-                        return self.explist(exp_list);
-                    } else {
-                        return vec![];
+                        return_types.push(self.explist(exp_list));
                     }
+                    break;
                 }
 
                 // Ignore these, as they don't (visibly) change the type environment.
@@ -403,16 +418,14 @@ impl TypedFile {
             }
         }
 
-        // If we're here,
-        // we didn't have any return statement.
-        vec![]
+        return_types
     }
 
     /// Typecheck an expression.
     /// Note that an expression may be a multiple return
     /// (e.g. from a function call or varargs expression),
-    /// so this function returns a `Vec<Type>`.
-    pub fn typecheck_expression(&mut self, expr: Node) -> Vec<Type> {
+    /// so this function returns a [`TypeList`].
+    pub fn typecheck_expression(&mut self, expr: Node) -> TypeList {
         log::trace!(
             "Finding type of expression `{}`",
             &self.src[expr.byte_range()]
@@ -570,7 +583,7 @@ impl TypedFile {
     /// the explist `foo(), 3, true, foo()`
     /// (where `foo` has return type `number, string`),
     /// will be evaluated to have the type `number, number, bool, number, string`.
-    fn explist(&mut self, list: Node) -> Vec<Type> {
+    fn explist(&mut self, list: Node) -> TypeList {
         let mut types = Vec::new();
 
         let count = list.named_child_count();
@@ -624,3 +637,7 @@ impl TypedFile {
             .extend(names.into_iter().zip(types.into_iter()));
     }
 }
+
+/// A `TypeList` represents a Lua explist,
+/// e.g. a multiple return or varargs expression.
+type TypeList = Vec<Type>;
