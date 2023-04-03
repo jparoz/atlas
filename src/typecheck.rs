@@ -1,9 +1,9 @@
+use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter;
 use std::path::Path;
 
-use im::hashmap::HashMap;
 use itertools::Itertools;
 use tree_sitter::{Node, Tree};
 
@@ -14,7 +14,7 @@ use crate::error::IncludeError;
 /// and all needed state and bookkeeping to return useful type information.
 pub struct Typechecker {
     parser: tree_sitter::Parser,
-    files: HashMap<FileID, (tree_sitter::Tree, TypedFile)>,
+    pub files: HashMap<FileID, (tree_sitter::Tree, TypedChunk)>,
 }
 
 impl Typechecker {
@@ -46,12 +46,10 @@ impl Typechecker {
             log::warn!("Syntax error");
         }
 
-        let (file_env, return_types) = TypedFile::new(&tree, contents);
-
-        log::trace!("file has possible return types: {return_types}");
+        let chunk = TypedChunk::new(&tree, contents);
 
         // @Todo: check if we overwrote an entry here
-        self.files.insert(id, (tree, file_env));
+        self.files.insert(id, (tree, chunk));
 
         Ok(())
     }
@@ -93,42 +91,99 @@ impl<P: AsRef<Path>> From<&P> for FileID {
     }
 }
 
-/// Manages the typechecking of a single Lua file.
+/// Represents the results of typechecking a single Lua chunk.
 #[derive(Debug, Clone)]
-pub struct TypedFile {
+pub struct TypedChunk {
     /// The contents of the file as it was read from disk.
     /// This is the string which was given to the tree-sitter parser to produce the `Tree`.
     pub src: String,
 
-    /// The current local scope.
-    local_scope: HashMap<String, Type>,
-
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the type environment at that node.
-    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedFile::new`].
-    pub scopes: HashMap<usize, HashMap<String, Type>>,
+    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
+    pub scopes: HashMap<usize, im::HashMap<String, Type>>,
 
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the types of the expression at that node.
-    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedFile::new`].
-    pub types: HashMap<usize, TypeList>,
+    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
+    pub types: im::HashMap<usize, TypeList>,
+
+    /// The set of all free variables in the chunk.
+    /// These are usually translated to global variable accesses.
+    pub free_variables: HashMap<String, Type>,
+
+    /// The set of all assigned globals in the chunk.
+    pub provided_globals: HashMap<String, Type>,
+
+    /// The possible return types of the chunk.
+    pub possible_return_types: PossibleReturnTypes,
 }
 
-impl TypedFile {
-    /// Builds the type environment at each statement in the given file.
-    /// Returns the new `TypedFile`,
-    /// along with the possible return types of the file.
-    pub fn new(tree: &Tree, src: String) -> (Self, PossibleReturnTypes) {
-        let mut env = TypedFile {
-            src,
-            local_scope: HashMap::new(),
-            scopes: HashMap::new(),
-            types: HashMap::new(),
-        };
-        let types = env.typecheck_block(tree.root_node());
-        (env, types)
-    }
+/// Manages the typechecking of a single Lua chunk.
+#[derive(Debug, Clone)]
+struct ChunkBuilder {
+    /// The contents of the file as it was read from disk.
+    /// This is the string which was given to the tree-sitter parser to produce the `Tree`.
+    src: String,
 
+    /// The current local scope.
+    local_scope: im::HashMap<String, Type>,
+
+    /// A map from a tree-sitter [`Node`]'s ID
+    /// to the type environment at that node.
+    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
+    scopes: HashMap<usize, im::HashMap<String, Type>>,
+
+    /// A map from a tree-sitter [`Node`]'s ID
+    /// to the types of the expression at that node.
+    /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
+    types: im::HashMap<usize, TypeList>,
+
+    /// The set of all free variables in the chunk.
+    /// These are usually translated to global variable accesses.
+    free_variables: HashMap<String, Type>,
+
+    /// The set of all assigned globals in the chunk.
+    provided_globals: HashMap<String, Type>,
+}
+
+impl TypedChunk {
+    /// Builds the type environment at each statement in the given chunk.
+    /// Returns the new `TypedChunk`.
+    pub fn new(tree: &Tree, src: String) -> Self {
+        let mut builder = ChunkBuilder {
+            src,
+
+            local_scope: im::HashMap::new(),
+
+            scopes: HashMap::new(),
+            types: im::HashMap::new(),
+            free_variables: HashMap::new(),
+            provided_globals: HashMap::new(),
+        };
+
+        let possible_return_types = builder.typecheck_block(tree.root_node());
+
+        let ChunkBuilder {
+            src,
+            scopes,
+            types,
+            free_variables,
+            provided_globals,
+            ..
+        } = builder;
+        TypedChunk {
+            src,
+            scopes,
+            types,
+            free_variables,
+            provided_globals,
+            possible_return_types,
+        }
+    }
+}
+
+impl ChunkBuilder {
     /// Builds the type environment in a block.
     /// Returns a list of all the possible return types of the block.
     fn typecheck_block(&mut self, block: Node) -> PossibleReturnTypes {
@@ -428,9 +483,15 @@ impl TypedFile {
 
             // Variable references
             "variable" => {
-                // @Todo: lookup globals as well
                 let var_str = &self.src[expr.byte_range()];
-                vec![self.local_scope.get(var_str).cloned().unwrap_or_default()]
+                if let Some(local) = self.local_scope.get(var_str) {
+                    vec![local.clone()]
+                } else {
+                    // @Todo @XXX: input type variables??
+                    let typ = Type::Unknown;
+                    self.free_variables.insert(var_str.to_string(), typ.clone());
+                    vec![typ]
+                }
             }
 
             // Tables
@@ -532,11 +593,13 @@ impl TypedFile {
             match param.kind() {
                 "identifier" => {
                     let name = self.src[param.byte_range()].to_string();
+
                     // @XXX @Todo: proper argument type checking
                     let typ = Type::Unknown;
 
                     arguments.push(typ.clone());
                     log::trace!("Binding function argument `{name}` to type: {typ:?}");
+                    self.declare_local([name.clone()]);
                     self.assign([name], [typ]);
                 }
 
@@ -622,13 +685,17 @@ impl TypedFile {
         I: IntoIterator<Item = String>,
         T: IntoIterator<Item = Type>,
     {
-        // @Todo @Fixme:
-        // If the variable isn't already in the local_scope,
-        // instead of assigning it there anyway,
-        // we should add it to the global table
-        // (or the equivalent _ENV nonsense).
-        self.local_scope
-            .extend(names.into_iter().zip(types.into_iter()));
+        for (name, typ) in names.into_iter().zip(types.into_iter()) {
+            if self.local_scope.contains_key(&name) {
+                // If it's been declared as a local,
+                // then set the type of that local.
+                self.local_scope.insert(name, typ);
+            } else {
+                // If it's not a local,
+                // mark that this chunk assigns a global variable of this name and type.
+                self.provided_globals.insert(name, typ);
+            }
+        }
     }
 }
 

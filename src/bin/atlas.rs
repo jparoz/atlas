@@ -4,7 +4,7 @@ use std::str::FromStr;
 use clap::builder::TypedValueParser;
 use clap::Parser;
 
-use atlas_lua::typecheck::Typechecker;
+use atlas_lua::typecheck::{FileID, Typechecker};
 
 fn main() {
     let args = Args::parse();
@@ -18,6 +18,22 @@ fn main() {
     let mut typechecker = Typechecker::new();
 
     typechecker.include(&args.file).unwrap();
+
+    let id = FileID::from(&args.file);
+    let (_tree, chunk) = &typechecker.files[&id];
+
+    log::trace!(
+        "Chunk closes over the variables: {:?}",
+        chunk.free_variables
+    );
+    log::trace!(
+        "Chunk assigns the following global variables: {:?}",
+        chunk.provided_globals
+    );
+    log::trace!(
+        "Chunk possible return types: {}",
+        chunk.possible_return_types
+    );
 }
 
 /// Typechecker for vanilla Lua without annotations
