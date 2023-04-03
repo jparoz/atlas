@@ -12,6 +12,7 @@ fn main() {
     env_logger::Builder::new()
         .filter(None, args.log)
         .format_timestamp(None)
+        .parse_write_style(&args.color)
         .init();
 
     let mut parser = tree_sitter::Parser::new();
@@ -38,6 +39,15 @@ struct Args {
                 .map(|s| log::LevelFilter::from_str(&s).unwrap()),
         )]
     log: log::LevelFilter,
+
+    /// Use colored output in logging
+    #[arg(
+        long, short,
+        default_value = "auto",
+        value_parser = clap::builder::PossibleValuesParser::new(
+                    ["auto", "always", "never"]),
+        )]
+    color: String,
 
     /// File to be typechecked
     #[arg(required = true)]
