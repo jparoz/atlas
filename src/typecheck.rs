@@ -623,7 +623,7 @@ impl ChunkBuilder {
         let returns = if let Some(body) = function_body.child_by_field_name("body") {
             self.typecheck_block(body)
         } else {
-            PossibleReturnTypes(Vec::new())
+            PossibleReturnTypes::default()
         };
 
         self.local_scope = saved_scope;
@@ -797,5 +797,11 @@ impl Display for PossibleReturnTypes {
                 .map(|type_list| type_list.iter().join(", "))
                 .join(" | ")
         )
+    }
+}
+
+impl Default for PossibleReturnTypes {
+    fn default() -> Self {
+        PossibleReturnTypes(vec![vec![Type::Nil]])
     }
 }
