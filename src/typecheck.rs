@@ -45,9 +45,9 @@ impl Typechecker {
             log::warn!("Syntax error");
         }
 
-        log::debug!("parsed:\n{}", tree.root_node().to_sexp());
+        let (file_env, return_types) = TypedFile::new(&tree, contents);
 
-        let file_env = TypedFile::new(&tree, contents);
+        log::trace!("file has possible return types: {return_types:?}");
 
         // @Todo: check if we overwrote an entry here
         self.files.insert(id, (tree, file_env));
@@ -92,7 +92,7 @@ impl<P: AsRef<Path>> From<&P> for FileID {
     }
 }
 
-#[derive(Debug, Default, Clone)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Type {
     // Basic scalar types
     Nil,
@@ -142,15 +142,17 @@ pub struct TypedFile {
 
 impl TypedFile {
     /// Builds the type environment at each statement in the given file.
-    pub fn new(tree: &Tree, src: String) -> Self {
+    /// Returns the new `TypedFile`,
+    /// along with the possible return types of the file.
+    pub fn new(tree: &Tree, src: String) -> (Self, Vec<TypeList>) {
         let mut env = TypedFile {
             src,
             local_scope: HashMap::new(),
             scopes: HashMap::new(),
             types: HashMap::new(),
         };
-        env.typecheck_block(tree.root_node());
-        env
+        let types = env.typecheck_block(tree.root_node());
+        (env, types)
     }
 
     /// Builds the type environment in a block.
@@ -161,7 +163,7 @@ impl TypedFile {
         // For each statement,
         // build the type environment at that point.
         let mut cursor = block.walk();
-        for statement in block.children(&mut cursor) {
+        for statement in block.named_children(&mut cursor) {
             // Save the current state of the type environment.
             log::trace!("local scope:\n{:?}", self.local_scope);
             self.scopes.insert(statement.id(), self.local_scope.clone());
@@ -407,16 +409,24 @@ impl TypedFile {
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
                         return_types.push(self.explist(exp_list));
+                    } else {
+                        // `return;` means `return nil;`
+                        return_types.push(vec![Type::Nil]);
                     }
                     break;
                 }
 
                 // Ignore these, as they don't (visibly) change the type environment.
-                "shebang" | "call" | "empty_statement" | "label_statement" | "goto_statement" => (),
+                "shebang" | "call" | "empty_statement" | "label_statement" | "goto_statement"
+                | "comment" => (),
 
-                _ => unreachable!("covered all statement types"),
+                kind => unreachable!("covered all statement types, got: {kind}"),
             }
         }
+
+        normalize_type_list(&mut return_types);
+
+        log::trace!("Block possible return types: {return_types:?}");
 
         return_types
     }
@@ -641,3 +651,11 @@ impl TypedFile {
 /// A `TypeList` represents a Lua explist,
 /// e.g. a multiple return or varargs expression.
 type TypeList = Vec<Type>;
+
+/// Normalizes a list of possible return types
+/// (i.e. a `Vec<TypeList>`),
+/// removing duplicate possiblities.
+fn normalize_type_list(types: &mut Vec<TypeList>) {
+    types.sort_unstable();
+    types.dedup();
+}

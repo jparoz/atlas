@@ -15,11 +15,6 @@ fn main() {
         .parse_write_style(&args.color)
         .init();
 
-    let mut parser = tree_sitter::Parser::new();
-    parser
-        .set_language(tree_sitter_lua::language())
-        .expect("Error loading Lua grammar");
-
     let mut typechecker = Typechecker::new();
 
     typechecker.include(&args.file).unwrap();
