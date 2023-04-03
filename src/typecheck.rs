@@ -102,8 +102,11 @@ pub enum Type {
     LightUserdata,
 
     // Parametric types
+    Function {
+        arguments: Vec<Type>,
+        returns: Vec<Type>,
+    },
     // @Todo @Fixme @XXX: include some parameters in these lol
-    Function,
     Thread,
     Table,
 
@@ -173,17 +176,22 @@ impl TypedFile {
                 // or modifying a previously-declared local.
                 "variable_assignment" => {
                     let var_list = statement.named_child(0).expect("non-optional");
+                    let names = self.list(var_list);
+
                     let expr_list = statement.named_child(1).expect("non-optional");
                     let types = self.explist(expr_list);
-                    self.assign(var_list, types);
+
+                    self.assign(names, types);
                 }
 
                 "local_variable_declaration" => {
                     let var_list = statement.named_child(0).expect("non-optional");
-                    self.declare_local(var_list);
+                    let names = self.list(var_list);
+                    self.declare_local(names.clone());
+
                     if let Some(expr_list) = statement.named_child(1) {
                         let types = self.explist(expr_list);
-                        self.assign(var_list, types);
+                        self.assign(names, types);
                     }
                 }
 
@@ -291,12 +299,14 @@ impl TypedFile {
                     // The results from this call are then assigned to the loop variables,
                     // following the rules of multiple assignments.
                     let var_list = statement.child_by_field_name("left").expect("non-optional");
+                    let names = self.list(var_list);
+
                     let expr_list = statement
                         .child_by_field_name("right")
                         .expect("non-optional");
-
                     let types = self.explist(expr_list);
-                    self.assign(var_list, types);
+
+                    self.assign(names, types);
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -351,19 +361,21 @@ impl TypedFile {
 
                 "function_definition_statement" => {
                     let name = statement.child_by_field_name("name").expect("non-optional");
+                    let name_string = self.src[name.byte_range()].to_string();
                     let function_type = self.typecheck_function(statement);
 
                     // @Todo @Fixme: change this to accept table type names,
                     // e.g. `function foo.bar:baz() body end`
-                    self.assign(name, [function_type]);
+                    self.assign([name_string], [function_type]);
                 }
 
                 "local_function_definition_statement" => {
                     let name = statement.child_by_field_name("name").expect("non-optional");
+                    let name_string = self.src[name.byte_range()].to_string();
                     let function_type = self.typecheck_function(statement);
 
-                    self.declare_local(name);
-                    self.assign(name, vec![function_type]);
+                    self.declare_local([name_string.clone()]);
+                    self.assign([name_string], [function_type]);
                 }
 
                 // @Todo @Checkme: should we do an early return here?
@@ -500,21 +512,43 @@ impl TypedFile {
     }
 
     /// Typecheck a function (either a [local] definition or an anonymous function expression).
-    pub fn typecheck_function(&self, function_body: Node) -> Type {
+    pub fn typecheck_function(&mut self, function_body: Node) -> Type {
+        log::trace!("Typechecking function `{:?}`", function_body);
+
+        let saved_scope = self.local_scope.clone();
+
         let params = function_body
             .child_by_field_name("parameters")
             .expect("non-optional");
+
+        let mut arguments = Vec::new();
+        let mut cursor = params.walk();
+        for param in params.named_children(&mut cursor) {
+            match param.kind() {
+                "identifier" => {
+                    let name = self.src[param.byte_range()].to_string();
+                    // @XXX @Todo: proper argument type checking
+                    let typ = Type::Unknown;
+
+                    arguments.push(typ.clone());
+                    log::trace!("Binding function argument `{name}` to type: {typ:?}");
+                    self.assign([name], [typ]);
+                }
+
+                "vararg_expression" => todo!(),
+
+                _ => unreachable!("covered all parameter types"),
+            }
+        }
+
         let body = function_body
             .child_by_field_name("body")
             .expect("non-optional");
+        let returns = self.typecheck_block(body);
 
-        log::debug!("params: {}", params.to_sexp());
-        log::debug!("body: {}", body.to_sexp());
+        self.local_scope = saved_scope;
 
-        // todo!()
-
-        // @XXX @Todo: make this return a properly parameterised and inferred type
-        Type::Function
+        Type::Function { arguments, returns }
     }
 
     /// Gets a list of child nodes as `Vec<String>`.
@@ -561,8 +595,10 @@ impl TypedFile {
     /// (with the uninitialized type).
     ///
     /// As in, `local foo`.
-    fn declare_local(&mut self, var_list: Node) {
-        let names = self.list(var_list);
+    fn declare_local<I>(&mut self, names: I)
+    where
+        I: IntoIterator<Item = String>,
+    {
         self.local_scope
             .extend(names.into_iter().zip(iter::repeat(Type::Uninitialized)));
     }
@@ -574,12 +610,11 @@ impl TypedFile {
     /// the extra expressions are ignored.
     ///
     /// As in, `foo, bar, baz = 1, 3`.
-    fn assign<I>(&mut self, var_list: Node, types: I)
+    fn assign<I, T>(&mut self, names: I, types: T)
     where
-        I: IntoIterator<Item = Type>,
+        I: IntoIterator<Item = String>,
+        T: IntoIterator<Item = Type>,
     {
-        let names = self.list(var_list);
-
         // @Todo @Fixme:
         // If the variable isn't already in the local_scope,
         // instead of assigning it there anyway,
