@@ -413,7 +413,7 @@ impl TypedFile {
     /// Note that an expression may be a multiple return
     /// (e.g. from a function call or varargs expression),
     /// so this function returns a [`TypeList`].
-    pub fn typecheck_expression(&mut self, expr: Node) -> TypeList {
+    fn typecheck_expression(&mut self, expr: Node) -> TypeList {
         log::trace!(
             "Finding type of expression `{}`",
             &self.src[expr.byte_range()]
@@ -518,7 +518,7 @@ impl TypedFile {
         types
     }
 
-    /// Typecheck a function (either a [local] definition or an anonymous function expression).
+    /// Typecheck a function (either a \[local] definition or an anonymous function expression).
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
         let saved_scope = self.local_scope.clone();
 
