@@ -4,7 +4,7 @@ use std::str::FromStr;
 use clap::builder::TypedValueParser;
 use clap::Parser;
 
-use atlas_lua::typecheck::{FileID, Typechecker};
+use atlas_lua::typecheck::Typechecker;
 
 fn main() {
     let args = Args::parse();
@@ -22,14 +22,6 @@ fn main() {
     let mut typechecker = Typechecker::new();
 
     typechecker.include(&args.file).unwrap();
-    let id = FileID::from(&args.file);
-
-    let typ = typechecker
-        .type_at_point(id, args.line, args.column)
-        .unwrap();
-    println!("Type: {typ:?}");
-
-    log::info!("Typechecker at the end of program:\n{typechecker:?}");
 }
 
 /// Typechecker for vanilla Lua without annotations
@@ -50,12 +42,4 @@ struct Args {
     /// File to be typechecked
     #[arg(required = true)]
     file: PathBuf,
-
-    /// Line to typecheck (zero-based)
-    #[arg(required = true)]
-    line: usize,
-
-    /// Column to typecheck (zero-based)
-    #[arg(required = true)]
-    column: usize,
 }

@@ -20,107 +20,6 @@ impl LuaFile {
     pub fn new(tree: Tree, src: String) -> Self {
         LuaFile { tree, src }
     }
-
-    /// Find the type of an expression,
-    /// given a type scope.
-    pub fn type_of_expression(&self, scope: &HashMap<String, Type>, expr: Node) -> Type {
-        log::trace!(
-            "Finding type of expression `{}`",
-            &self.src[expr.byte_range()]
-        );
-
-        match expr.kind() {
-            // Primitive types
-            "nil" => Type::Nil,
-            "true" | "false" => Type::Boolean,
-            "number" => Type::Number,
-            "string" => Type::String,
-
-            // Variable references
-            "variable" => {
-                // @Todo: lookup globals as well
-                let var_str = &self.src[expr.byte_range()];
-                scope.get(var_str).cloned().unwrap_or_default()
-            }
-
-            // Tables
-            "table" => Type::Table,
-
-            // Functions
-            "function_definition" => Type::Function,
-
-            // @Todo @XXX:
-            // Lookup the type of the function/object being called,
-            // check the argument types (?),
-            // and return the return type.
-            "call" => Type::Unknown,
-
-            "parenthesized_expression" => {
-                self.type_of_expression(scope, expr.named_child(0).expect("non-optional"))
-            }
-
-            // @Todo: probably need a specific type for varargs;
-            // similar to a list type,
-            // similar to a multiple return type,
-            // but a bit different to both.
-            "vararg_expression" => todo!(),
-
-            // @Todo: handle metatables
-            // @Todo: check the type of the operand (here? or elsewhere?)
-            "unary_expression" => {
-                let operator = expr.child_by_field_name("operator").expect("non-optional");
-                match &self.src[operator.byte_range()] {
-                    // number
-                    "-" | "#" => Type::Number,
-
-                    // integer
-                    // @Todo: not Type::Number
-                    "~" => Type::Number,
-
-                    // bool
-                    "not" => Type::Boolean,
-
-                    _ => unreachable!(),
-                }
-            }
-
-            // @Todo: handle metatables
-            // @Todo: check the type of the operands (here? or elsewhere?)
-            "binary_expression" => {
-                let operator = expr.child_by_field_name("operator").expect("non-optional");
-                match &self.src[operator.byte_range()] {
-                    // number
-                    "+" | "-" | "*" | "//" | "%" => Type::Number,
-
-                    // float
-                    "/" | "^" => Type::Number,
-
-                    // bool
-                    "==" | "~=" | "<" | ">" | "<=" | ">=" => Type::Boolean,
-
-                    // short-circuiting
-                    // @XXX @Todo @Fixme: not always boolean
-                    "or" | "and" => Type::Boolean,
-
-                    // integer
-                    // @Todo: not Type::Number
-                    "|" | "~" | "&" | "<<" | ">>" => Type::Number,
-
-                    // string
-                    ".." => Type::String,
-
-                    _ => unreachable!(),
-                }
-            }
-
-            _ => unreachable!("should have covered all types of expression"),
-        }
-    }
-
-    pub fn type_of_function(&self, function_body: Node) -> Type {
-        // @XXX @Todo: make this return a properly parameterised and inferred type
-        Type::Function
-    }
 }
 
 pub struct Environment<'a> {
@@ -144,12 +43,13 @@ impl<'a> Environment<'a> {
             local_scope: HashMap::new(),
             scopes: HashMap::new(),
         };
-        env.type_block(file.tree.root_node());
+        env.typecheck_block(file.tree.root_node());
         env
     }
 
     /// Builds the type environment in a block.
-    fn type_block(&mut self, block: Node<'a>) {
+    /// Returns the return type of the block.
+    fn typecheck_block(&mut self, block: Node<'a>) -> Type {
         // For each statement,
         // build the type environment at that point.
         let mut cursor = block.walk();
@@ -186,7 +86,7 @@ impl<'a> Environment<'a> {
                     let saved_scope = self.local_scope.clone();
 
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.type_block(body);
+                        self.typecheck_block(body);
                     }
 
                     self.local_scope = saved_scope;
@@ -199,12 +99,12 @@ impl<'a> Environment<'a> {
                     let condition = statement
                         .child_by_field_name("condition")
                         .expect("non-optional");
-                    let condition_type = self.file.type_of_expression(&self.local_scope, condition);
+                    let condition_type = self.typecheck_expression(condition);
                     // @Todo: something with condition_type
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.type_block(body);
+                        self.typecheck_block(body);
                     }
 
                     self.local_scope = saved_scope;
@@ -215,14 +115,14 @@ impl<'a> Environment<'a> {
 
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.type_block(body);
+                        self.typecheck_block(body);
                     }
 
                     // until
                     let condition = statement
                         .child_by_field_name("condition")
                         .expect("non-optional");
-                    let condition_type = self.file.type_of_expression(&self.local_scope, condition);
+                    let condition_type = self.typecheck_expression(condition);
                     // @Todo: something with condition_type
 
                     self.local_scope = saved_scope;
@@ -240,7 +140,7 @@ impl<'a> Environment<'a> {
                     let start = statement
                         .child_by_field_name("start")
                         .expect("non-optional");
-                    let start_type = self.file.type_of_expression(&self.local_scope, start);
+                    let start_type = self.typecheck_expression(start);
                     // @Todo: check that start can be converted to a number
 
                     // @Note: Numerical for loops convert their arguments to numbers,
@@ -257,7 +157,7 @@ impl<'a> Environment<'a> {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.type_block(body);
+                        self.typecheck_block(body);
                     }
 
                     self.local_scope = saved_scope;
@@ -294,7 +194,7 @@ impl<'a> Environment<'a> {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        self.type_block(body);
+                        self.typecheck_block(body);
                     }
 
                     self.local_scope = saved_scope;
@@ -310,13 +210,13 @@ impl<'a> Environment<'a> {
                     let condition = statement
                         .child_by_field_name("condition")
                         .expect("non-optional");
-                    let condition_type = self.file.type_of_expression(&self.local_scope, condition);
+                    let condition_type = self.typecheck_expression(condition);
                     // @Todo: something with condition_type
 
                     // then [consequence]
                     if let Some(consequence) = statement.child_by_field_name("consequence") {
                         let saved_scope = self.local_scope.clone();
-                        self.type_block(consequence);
+                        self.typecheck_block(consequence);
                         self.local_scope = saved_scope;
                     }
 
@@ -325,20 +225,19 @@ impl<'a> Environment<'a> {
                         // {elseif condition then [consequence]}
                         if let Some(condition) = elseif.child_by_field_name("condition") {
                             // elseif condition
-                            let condition_type =
-                                self.file.type_of_expression(&self.local_scope, condition);
+                            let condition_type = self.typecheck_expression(condition);
                             // @Todo: something with condition_type
 
                             // then [consequence]
                             if let Some(consequence) = elseif.child_by_field_name("consequence") {
                                 let saved_scope = self.local_scope.clone();
-                                self.type_block(consequence);
+                                self.typecheck_block(consequence);
                                 self.local_scope = saved_scope;
                             }
                         // [else [body]]
                         } else if let Some(body) = elseif.child_by_field_name("body") {
                             let saved_scope = self.local_scope.clone();
-                            self.type_block(body);
+                            self.typecheck_block(body);
                             self.local_scope = saved_scope;
                         }
                     }
@@ -368,7 +267,8 @@ impl<'a> Environment<'a> {
                 // Code after a `break` is unreachable,
                 // so anything in that unreachable code doesn't really have a type anyway.
                 // @Todo: emit a warning about any unreachable code after this break.
-                "break_statement" => return,
+                // @XXX @Todo @Fixme
+                "break_statement" => return todo!(),
 
                 // @Todo: the type of this return statement
                 // is sort of the type of the containing block;
@@ -383,12 +283,127 @@ impl<'a> Environment<'a> {
                         log::debug!("returned: `{}`", &self.file.src[exp_list.byte_range()])
                     }
 
-                    return;
+                    // @XXX
+                    return Type::Unknown;
                 }
 
                 _ => unreachable!("covered all statement types"),
             }
         }
+
+        // If we're here,
+        // we didn't have any return statement;
+        // so the return type of the block is nil.
+        Type::Nil
+    }
+
+    /// Typecheck an expression.
+    pub fn typecheck_expression(&self, expr: Node) -> Type {
+        log::trace!(
+            "Finding type of expression `{}`",
+            &self.file.src[expr.byte_range()]
+        );
+
+        match expr.kind() {
+            // Primitive types
+            "nil" => Type::Nil,
+            "true" | "false" => Type::Boolean,
+            "number" => Type::Number,
+            "string" => Type::String,
+
+            // Variable references
+            "variable" => {
+                // @Todo: lookup globals as well
+                let var_str = &self.file.src[expr.byte_range()];
+                self.local_scope.get(var_str).cloned().unwrap_or_default()
+            }
+
+            // Tables
+            "table" => Type::Table,
+
+            // Functions
+            "function_definition" => self.typecheck_function(expr),
+
+            // @Todo @XXX:
+            // Lookup the type of the function/object being called,
+            // check the argument types (?),
+            // and return the return type.
+            "call" => Type::Unknown,
+
+            "parenthesized_expression" => {
+                self.typecheck_expression(expr.named_child(0).expect("non-optional"))
+            }
+
+            // @Todo: probably need a specific type for varargs;
+            // similar to a list type,
+            // similar to a multiple return type,
+            // but a bit different to both.
+            "vararg_expression" => todo!(),
+
+            // @Todo: handle metatables
+            // @Todo: check the type of the operand (here? or elsewhere?)
+            "unary_expression" => {
+                let operator = expr.child_by_field_name("operator").expect("non-optional");
+                match &self.file.src[operator.byte_range()] {
+                    // number
+                    "-" | "#" => Type::Number,
+
+                    // integer
+                    // @Todo: not Type::Number
+                    "~" => Type::Number,
+
+                    // bool
+                    "not" => Type::Boolean,
+
+                    _ => unreachable!(),
+                }
+            }
+
+            // @Todo: handle metatables
+            // @Todo: check the type of the operands (here? or elsewhere?)
+            "binary_expression" => {
+                let operator = expr.child_by_field_name("operator").expect("non-optional");
+                match &self.file.src[operator.byte_range()] {
+                    // number
+                    "+" | "-" | "*" | "//" | "%" => Type::Number,
+
+                    // float
+                    "/" | "^" => Type::Number,
+
+                    // bool
+                    "==" | "~=" | "<" | ">" | "<=" | ">=" => Type::Boolean,
+
+                    // short-circuiting
+                    // @XXX @Todo @Fixme: not always boolean
+                    "or" | "and" => Type::Boolean,
+
+                    // integer
+                    // @Todo: not Type::Number
+                    "|" | "~" | "&" | "<<" | ">>" => Type::Number,
+
+                    // string
+                    ".." => Type::String,
+
+                    _ => unreachable!(),
+                }
+            }
+
+            _ => unreachable!("should have covered all types of expression"),
+        }
+    }
+
+    /// Typecheck a function (either a [local] definition or an anonymous function expression).
+    pub fn typecheck_function(&self, function_body: Node) -> Type {
+        let params = function_body.child_by_field_name("parameters").unwrap();
+        let body = function_body.child_by_field_name("body").unwrap();
+
+        log::debug!("params: {}", params.to_sexp());
+        log::debug!("body: {}", body.to_sexp());
+
+        // todo!()
+
+        // @XXX @Todo: make this return a properly parameterised and inferred type
+        Type::Function
     }
 
     /// Gets a list of child nodes as `Vec<String>`.
@@ -436,9 +451,10 @@ impl<'a> Environment<'a> {
 
         let mut expr_cursor = expr_list.walk();
 
+        #[allow(clippy::needless_collect)]
         let types: Vec<Type> = expr_list
             .children_by_field_name("value", &mut expr_cursor)
-            .map(|value_node| self.file.type_of_expression(&self.local_scope, value_node))
+            .map(|value_node| self.typecheck_expression(value_node))
             .into_iter()
             .collect();
 
