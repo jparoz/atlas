@@ -1,9 +1,9 @@
-use std::collections::HashMap;
 use std::fmt::{self, Display};
 use std::fs;
 use std::iter;
 use std::path::Path;
 
+use im::{HashMap, HashSet};
 use itertools::Itertools;
 use tree_sitter::{Node, Tree};
 
@@ -103,22 +103,22 @@ pub struct TypedChunk {
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the type environment at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
-    pub scopes: HashMap<usize, im::HashMap<String, Type>>,
+    pub scopes: HashMap<usize, HashMap<String, ConstraintSet>>,
 
     /// A map from a tree-sitter [`Node`]'s ID
-    /// to the types of the expression at that node.
+    /// to the set of type constraints upon the expression at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
-    pub types: im::HashMap<usize, TypeList>,
+    pub type_constraints: HashMap<usize, ExpList>,
 
     /// The set of all free variables in the chunk.
     /// These are usually translated to global variable accesses.
-    pub free_variables: HashMap<String, Type>,
+    pub free_variables: HashMap<String, ConstraintSet>,
 
     /// The set of all assigned globals in the chunk.
-    pub provided_globals: HashMap<String, Type>,
+    pub provided_globals: HashMap<String, ConstraintSet>,
 
-    /// The possible return types of the chunk.
-    pub possible_return_types: PossibleReturnTypes,
+    /// The return type of the chunk.
+    pub return_type: ExpList,
 }
 
 /// Manages the typechecking of a single Lua chunk.
@@ -126,11 +126,11 @@ pub struct TypedChunk {
 #[derive(Debug, Clone)]
 struct ChunkBuilder {
     src: String,
-    local_scope: im::HashMap<String, Type>,
-    scopes: HashMap<usize, im::HashMap<String, Type>>,
-    types: im::HashMap<usize, TypeList>,
-    free_variables: HashMap<String, Type>,
-    provided_globals: HashMap<String, Type>,
+    local_scope: HashMap<String, ConstraintSet>,
+    scopes: HashMap<usize, HashMap<String, ConstraintSet>>,
+    type_constraints: HashMap<usize, ExpList>,
+    free_variables: HashMap<String, ConstraintSet>,
+    provided_globals: HashMap<String, ConstraintSet>,
 }
 
 impl TypedChunk {
@@ -140,20 +140,20 @@ impl TypedChunk {
         let mut builder = ChunkBuilder {
             src,
 
-            local_scope: im::HashMap::new(),
+            local_scope: HashMap::new(),
 
             scopes: HashMap::new(),
-            types: im::HashMap::new(),
+            type_constraints: HashMap::new(),
             free_variables: HashMap::new(),
             provided_globals: HashMap::new(),
         };
 
-        let possible_return_types = builder.typecheck_block(tree.root_node());
+        let return_type = builder.typecheck_block(tree.root_node());
 
         let ChunkBuilder {
             src,
             scopes,
-            types,
+            type_constraints,
             free_variables,
             provided_globals,
             ..
@@ -161,10 +161,10 @@ impl TypedChunk {
         TypedChunk {
             src,
             scopes,
-            types,
+            type_constraints,
             free_variables,
             provided_globals,
-            possible_return_types,
+            return_type,
         }
     }
 }
@@ -172,8 +172,8 @@ impl TypedChunk {
 impl ChunkBuilder {
     /// Builds the type environment in a block.
     /// Returns a list of all the possible return types of the block.
-    fn typecheck_block(&mut self, block: Node) -> PossibleReturnTypes {
-        let mut return_types: PossibleReturnTypes = PossibleReturnTypes(Vec::new());
+    fn typecheck_block(&mut self, block: Node) -> ExpList {
+        let mut return_type = ExpList::new();
 
         // For each statement,
         // build the type environment at that point.
@@ -200,7 +200,7 @@ impl ChunkBuilder {
                     let expr_list = statement.named_child(1).expect("non-optional");
                     let types = self.explist(expr_list);
 
-                    self.assign(names, types);
+                    self.assign(names, types.0);
                 }
 
                 "local_variable_declaration" => {
@@ -210,7 +210,7 @@ impl ChunkBuilder {
 
                     if let Some(expr_list) = statement.named_child(1) {
                         let types = self.explist(expr_list);
-                        self.assign(names, types);
+                        self.assign(names, types.0);
                     }
                 }
 
@@ -219,7 +219,11 @@ impl ChunkBuilder {
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let types = self.typecheck_block(body);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     }
 
                     self.local_scope = saved_scope;
@@ -238,7 +242,11 @@ impl ChunkBuilder {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let types = self.typecheck_block(body);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     }
 
                     self.local_scope = saved_scope;
@@ -250,7 +258,11 @@ impl ChunkBuilder {
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
                         let types = self.typecheck_block(body);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     }
 
                     // until
@@ -281,7 +293,7 @@ impl ChunkBuilder {
                     // @Note: Numerical for loops convert their arguments to numbers,
                     // so the bound variable is guaranteed to have the type `number`
                     // (either integer or float; see section 3.3.5 of Lua 5.4 manual).
-                    self.local_scope.insert(name_str, Type::Number);
+                    self.local_scope.insert(name_str, Type::Number.into());
 
                     let end = statement.child_by_field_name("end").expect("non-optional");
                     // @Todo: check that end can be converted to a number
@@ -293,7 +305,11 @@ impl ChunkBuilder {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let types = self.typecheck_block(body);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     }
 
                     self.local_scope = saved_scope;
@@ -329,12 +345,16 @@ impl ChunkBuilder {
                         .expect("non-optional");
                     let types = self.explist(expr_list);
 
-                    self.assign(names, types);
+                    self.assign(names, types.0);
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let types = self.typecheck_block(body);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     }
 
                     self.local_scope = saved_scope;
@@ -358,7 +378,11 @@ impl ChunkBuilder {
                         let saved_scope = self.local_scope.clone();
 
                         let types = self.typecheck_block(consequence);
-                        return_types.0.extend(types.0);
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
 
                         self.local_scope = saved_scope;
                     }
@@ -376,7 +400,11 @@ impl ChunkBuilder {
                                 let saved_scope = self.local_scope.clone();
 
                                 let types = self.typecheck_block(consequence);
-                                return_types.0.extend(types.0);
+                                for (constraints, new_constraints) in
+                                    return_type.0.iter_mut().zip(types.0.into_iter())
+                                {
+                                    constraints.0.extend(new_constraints.0);
+                                }
 
                                 self.local_scope = saved_scope;
                             }
@@ -385,7 +413,11 @@ impl ChunkBuilder {
                             let saved_scope = self.local_scope.clone();
 
                             let types = self.typecheck_block(body);
-                            return_types.0.extend(types.0);
+                            for (constraints, new_constraints) in
+                                return_type.0.iter_mut().zip(types.0.into_iter())
+                            {
+                                constraints.0.extend(new_constraints.0);
+                            }
 
                             self.local_scope = saved_scope;
                         }
@@ -401,7 +433,7 @@ impl ChunkBuilder {
 
                     // @Todo @Fixme: change this to accept table type names,
                     // e.g. `function foo.bar:baz() body end`
-                    self.assign([name_string], [function_type]);
+                    self.assign([name_string], [function_type.into()]);
                 }
 
                 "local_function_definition_statement" => {
@@ -412,7 +444,7 @@ impl ChunkBuilder {
                     let function_type = self.typecheck_function(statement);
 
                     self.declare_local([name_string.clone()]);
-                    self.assign([name_string], [function_type]);
+                    self.assign([name_string], [function_type.into()]);
                 }
 
                 // @Todo @Checkme: should we do an early return here?
@@ -427,10 +459,25 @@ impl ChunkBuilder {
                 // but possibly we could still check some stuff after the return statement.
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
-                        return_types.0.push(self.explist(exp_list));
+                        let types = self.explist(exp_list);
+
+                        if return_type.0.len() < types.0.len() {
+                            return_type
+                                .0
+                                .resize(types.0.len(), ConstraintSet::default());
+                        }
+
+                        for (constraints, new_constraints) in
+                            return_type.0.iter_mut().zip(types.0.into_iter())
+                        {
+                            constraints.0.extend(new_constraints.0);
+                        }
                     } else {
                         // `return;` means `return nil;`
-                        return_types.0.push(vec![Type::Nil]);
+                        return_type
+                            .0
+                            .get_mut(0)
+                            .map(|cons| cons.0.insert(Type::Nil.into()));
                     }
                     break;
                 }
@@ -443,64 +490,65 @@ impl ChunkBuilder {
             }
         }
 
-        PossibleReturnTypes::normalize(&mut return_types);
+        log::trace!("Block return type: {return_type:?}");
 
-        log::trace!("Block possible return types: {return_types}");
-
-        return_types
+        return_type
     }
 
     /// Typecheck an expression.
     /// Note that an expression may be a multiple return
     /// (e.g. from a function call or varargs expression),
-    /// so this function returns a [`TypeList`].
-    fn typecheck_expression(&mut self, expr: Node) -> TypeList {
+    /// so this function returns an [`ExpList`].
+    fn typecheck_expression(&mut self, expr: Node) -> ExpList {
         log::trace!(
             "Finding type of expression `{}`",
             &self.src[expr.byte_range()]
         );
 
-        let types = match expr.kind() {
+        let explist = match expr.kind() {
             // Primitive types
-            "nil" => vec![Type::Nil],
-            "true" | "false" => vec![Type::Boolean],
-            "number" => vec![Type::Number],
-            "string" => vec![Type::String],
+            "nil" => vec![Type::Nil.into()].into(),
+            "true" | "false" => vec![Type::Boolean.into()].into(),
+            "number" => vec![Type::Number.into()].into(),
+            "string" => vec![Type::String.into()].into(),
 
             // Variable references
             "variable" => {
                 let var_str = &self.src[expr.byte_range()];
                 if let Some(local) = self.local_scope.get(var_str) {
-                    vec![local.clone()]
+                    vec![local.clone()].into()
                 } else if let Some(global_defined_here) = self.provided_globals.get(var_str) {
-                    vec![global_defined_here.clone()]
+                    vec![global_defined_here.clone()].into()
+                } else if let Some(global_already_referenced) = self.free_variables.get(var_str) {
+                    vec![global_already_referenced.clone()].into()
                 } else {
                     // @Todo @XXX: input type variables??
-                    let typ = Type::Unknown;
-                    self.free_variables.insert(var_str.to_string(), typ.clone());
-                    vec![typ]
+                    let constraints = ConstraintSet::new();
+                    self.free_variables
+                        .insert(var_str.to_string(), constraints.clone());
+                    vec![constraints].into()
                 }
             }
 
             // Tables
-            "table" => vec![Type::Table],
+            "table" => vec![Type::Table.into()].into(),
 
             // Functions
             "function_definition" => {
                 log::trace!("Typechecking anonymous function defined at {expr:?}");
-                vec![self.typecheck_function(expr)]
+                vec![self.typecheck_function(expr).into()].into()
             }
 
             // @Todo @XXX:
             // Lookup the type of the function/object being called,
             // check the argument types (?),
             // and return the return type.
-            "call" => vec![Type::Unknown],
+            "call" => vec![Type::Unknown.into()].into(),
 
             "parenthesized_expression" => {
                 let sub_expr = expr.named_child(0).expect("non-optional");
                 let mut types = self.typecheck_expression(sub_expr);
-                types.truncate(1);
+                types.0.truncate(1);
                 types
             }
 
@@ -516,14 +564,14 @@ impl ChunkBuilder {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "-" | "#" => vec![Type::Number],
+                    "-" | "#" => vec![Type::Number.into()].into(),
 
                     // integer
                     // @Todo: not Type::Number
-                    "~" => vec![Type::Number],
+                    "~" => vec![Type::Number.into()].into(),
 
                     // bool
-                    "not" => vec![Type::Boolean],
+                    "not" => vec![Type::Boolean.into()].into(),
 
                     _ => unreachable!(),
                 }
@@ -535,13 +583,13 @@ impl ChunkBuilder {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "+" | "-" | "*" | "//" | "%" => vec![Type::Number],
+                    "+" | "-" | "*" | "//" | "%" => vec![Type::Number.into()].into(),
 
                     // float
-                    "/" | "^" => vec![Type::Number],
+                    "/" | "^" => vec![Type::Number.into()].into(),
 
                     // bool
-                    "==" | "~=" | "<" | ">" | "<=" | ">=" => vec![Type::Boolean],
+                    "==" | "~=" | "<" | ">" | "<=" | ">=" => vec![Type::Boolean.into()].into(),
 
                     // short-circuiting
                     //
@@ -569,16 +617,16 @@ impl ChunkBuilder {
                     "or" | "and" => {
                         let right = expr.child_by_field_name("right").expect("non-optional");
                         let mut types = self.typecheck_expression(right);
-                        types.truncate(1);
+                        types.0.truncate(1);
                         types
                     }
 
                     // integer
                     // @Todo: not Type::Number
-                    "|" | "~" | "&" | "<<" | ">>" => vec![Type::Number],
+                    "|" | "~" | "&" | "<<" | ">>" => vec![Type::Number.into()].into(),
 
                     // string
-                    ".." => vec![Type::String],
+                    ".." => vec![Type::String.into()].into(),
 
                     _ => unreachable!(),
                 }
@@ -588,16 +636,16 @@ impl ChunkBuilder {
         };
 
         // @Todo: check for clashes
-        self.types.insert(expr.id(), types.clone());
+        self.type_constraints.insert(expr.id(), explist.clone());
 
-        types
+        explist
     }
 
     /// Typecheck a function (either a \[local] definition or an anonymous function expression).
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
         let saved_scope = self.local_scope.clone();
 
-        let mut arguments = Vec::new();
+        let mut arguments = ExpList::new();
 
         if let Some(params) = function_body.child_by_field_name("parameters") {
             let mut cursor = params.walk();
@@ -605,14 +653,13 @@ impl ChunkBuilder {
                 match param.kind() {
                     "identifier" => {
                         let name = self.src[param.byte_range()].to_string();
+                        let constraints = ConstraintSet::new();
 
-                        // @XXX @Todo: proper argument type checking
-                        let typ = Type::Unknown;
+                        arguments.0.push(constraints.clone());
 
-                        arguments.push(typ.clone());
-                        log::trace!("Binding function argument `{name}` to type: {typ:?}");
+                        log::trace!("Binding function argument `{name}` to type: {constraints:?}");
                         self.declare_local([name.clone()]);
-                        self.assign([name], [typ]);
+                        self.assign([name], [constraints]);
                     }
 
                     "vararg_expression" => todo!(),
@@ -625,7 +672,7 @@ impl ChunkBuilder {
         let returns = if let Some(body) = function_body.child_by_field_name("body") {
             self.typecheck_block(body)
         } else {
-            PossibleReturnTypes::default()
+            ExpList::new()
         };
 
         self.local_scope = saved_scope;
@@ -644,7 +691,7 @@ impl ChunkBuilder {
     }
 
     /// Finds the types of a Lua explist
-    /// (in tree-sitter it's called an expression_list).
+    /// (in tree-sitter it's called an `expression_list`).
     ///
     /// It does this by taking all arguments except the last
     /// and adjusting their types to be a single return value;
@@ -654,8 +701,8 @@ impl ChunkBuilder {
     /// the explist `foo(), 3, true, foo()`
     /// (where `foo` has return type `number, string`),
     /// will be evaluated to have the type `number, number, bool, number, string`.
-    fn explist(&mut self, list: Node) -> TypeList {
-        let mut types = Vec::new();
+    fn explist(&mut self, list: Node) -> ExpList {
+        let mut types = ExpList::new();
 
         let count = list.named_child_count();
         let mut cursor = list.walk();
@@ -666,9 +713,9 @@ impl ChunkBuilder {
             .enumerate()
         {
             if i + 1 < count {
-                types.push(ts.swap_remove(0))
+                types.0.push(ts.0.swap_remove(0))
             } else {
-                types.extend(ts)
+                types.0.extend(ts.0)
             }
         }
 
@@ -694,20 +741,20 @@ impl ChunkBuilder {
     /// the extra expressions are ignored.
     ///
     /// As in, `foo, bar, baz = 1, 3`.
-    fn assign<I, T>(&mut self, names: I, types: T)
+    fn assign<I, T>(&mut self, names: I, cons_sets: T)
     where
         I: IntoIterator<Item = String>,
-        T: IntoIterator<Item = Type>,
+        T: IntoIterator<Item = ConstraintSet>,
     {
-        for (name, typ) in names.into_iter().zip(types.into_iter()) {
+        for (name, constraints) in names.into_iter().zip(cons_sets.into_iter()) {
             if self.local_scope.contains_key(&name) {
                 // If it's been declared as a local,
-                // then set the type of that local.
-                self.local_scope.insert(name, typ);
+                // then overwrite the type of that local.
+                self.local_scope.insert(name, constraints);
             } else {
                 // If it's not a local,
                 // mark that this chunk assigns a global variable of this name and type.
-                self.provided_globals.insert(name, typ);
+                self.provided_globals.insert(name, constraints);
             }
         }
     }
@@ -715,7 +762,7 @@ impl ChunkBuilder {
 
 /// A `Type` represents all the possible Lua types,
 /// including some pseudo-types such as the state of being an uninitialized variable.
-#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord)]
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub enum Type {
     // Basic scalar types
     Nil,
@@ -726,8 +773,8 @@ pub enum Type {
 
     // Parametric types
     Function {
-        arguments: Vec<Type>,
-        returns: PossibleReturnTypes,
+        arguments: ExpList,
+        returns: ExpList,
     },
     // @Todo @Fixme @XXX: include some parameters in these lol
     Thread,
@@ -755,11 +802,7 @@ impl Display for Type {
 
             // Parametric types
             Function { arguments, returns } => {
-                write!(
-                    f,
-                    "(({args}) -> {returns})",
-                    args = arguments.iter().join(", ")
-                )
+                write!(f, "(({arguments:?}) -> {returns:?})",)
             }
 
             Thread => write!(f, "thread"),
@@ -772,38 +815,85 @@ impl Display for Type {
     }
 }
 
-/// A `TypeList` represents a Lua explist,
+/// An `ExpList` represents a Lua explist,
 /// e.g. a multiple return or varargs expression.
-type TypeList = Vec<Type>;
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ExpList(Vec<ConstraintSet>);
 
-/// A `PossibleReturnTypes` represents all the possible return types from a function or block.
-#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord)]
-pub struct PossibleReturnTypes(Vec<TypeList>);
-
-impl PossibleReturnTypes {
-    /// Normalizes a list of possible return types,
-    /// removing duplicate possiblities.
-    fn normalize(&mut self) {
-        self.0.sort_unstable();
-        self.0.dedup();
+impl ExpList {
+    fn new() -> Self {
+        ExpList(Vec::new())
     }
 }
 
-impl Display for PossibleReturnTypes {
+impl From<Vec<ConstraintSet>> for ExpList {
+    fn from(exps: Vec<ConstraintSet>) -> Self {
+        ExpList(exps)
+    }
+}
+
+impl Display for ExpList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
-            "{}",
-            self.0
-                .iter()
-                .map(|type_list| type_list.iter().join(", "))
-                .join(" | ")
-        )
+        write!(f, "{}", self.0.iter().join(", "))
     }
 }
 
-impl Default for PossibleReturnTypes {
-    fn default() -> Self {
-        PossibleReturnTypes(vec![vec![Type::Nil]])
+/// A `Constraint` represents the set of operations that the type of a variable must admit,
+/// based on uses of the variable.
+/// This set of operations can be resolved to a concrete type,
+/// e.g. to find the type of a function.
+///
+/// For now, operations are modelled directly as types;
+/// This doesn't allow for operations which accept multiple types.
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub enum Constraint {
+    IsType(Type),
+    Or(Vec<Constraint>),
+    And(Vec<Constraint>),
+}
+
+impl ConstraintSet {
+    /// Tries to find a type which satisfies all constraints in the set.
+    // @Todo: not Option<Type>, maybe Vec<Type>? or Result<Type>
+    fn unify(self) -> Option<Type> {
+        todo!()
+    }
+}
+
+impl Display for Constraint {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        use Constraint::*;
+        match self {
+            IsType(typ) => typ.fmt(f),
+            And(constraints) => write!(f, "({})", constraints.iter().join(" & ")),
+            Or(constraints) => write!(f, "({})", constraints.iter().join(" | ")),
+        }
+    }
+}
+
+impl From<Type> for Constraint {
+    fn from(typ: Type) -> Self {
+        Constraint::IsType(typ)
+    }
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct ConstraintSet(HashSet<Constraint>);
+
+impl ConstraintSet {
+    fn new() -> Self {
+        ConstraintSet(HashSet::new())
+    }
+}
+
+impl From<Type> for ConstraintSet {
+    fn from(typ: Type) -> Self {
+        ConstraintSet(im::hashset! {typ.into()})
+    }
+}
+
+impl Display for ConstraintSet {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "({})", self.0.iter().join(" & "))
     }
 }

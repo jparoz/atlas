@@ -30,10 +30,7 @@ fn main() {
         "Chunk assigns the following global variables: {:?}",
         chunk.provided_globals
     );
-    log::info!(
-        "Chunk possible return types: {}",
-        chunk.possible_return_types
-    );
+    log::info!("Chunk return type: {}", chunk.return_type);
 }
 
 /// Typechecker for vanilla Lua without annotations
