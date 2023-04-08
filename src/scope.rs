@@ -30,6 +30,10 @@ impl Scope {
     pub fn get_mut(&mut self, key: &str) -> Option<&mut ConstraintSet> {
         self.names.get_mut(key)
     }
+
+    pub fn remove(&mut self, k: &str) -> Option<ConstraintSet> {
+        self.names.remove(k)
+    }
 }
 
 impl Extend<String> for Scope {

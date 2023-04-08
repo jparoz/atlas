@@ -698,7 +698,7 @@ impl ChunkBuilder {
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
         let saved_scope = self.local_scope.clone();
 
-        let mut arguments = ExpList::new();
+        let mut argument_names = Vec::new();
 
         if let Some(params) = function_body.child_by_field_name("parameters") {
             let mut cursor = params.walk();
@@ -708,7 +708,7 @@ impl ChunkBuilder {
                         let name = self.src[param.byte_range()].to_string();
                         let constraints = ConstraintSet::new();
 
-                        arguments.0.push(constraints.clone());
+                        argument_names.push(name.clone());
 
                         log::trace!("Binding function argument `{name}` to type: {constraints:?}");
                         self.declare_local([name.clone()]);
@@ -727,6 +727,15 @@ impl ChunkBuilder {
         } else {
             ExpList::new()
         };
+
+        let mut arguments = ExpList::new();
+        for name in argument_names {
+            let constraints = self
+                .local_scope
+                .remove(&name)
+                .expect("declare_local should have inserted this key");
+            arguments.0.push(constraints);
+        }
 
         self.local_scope = saved_scope;
 
