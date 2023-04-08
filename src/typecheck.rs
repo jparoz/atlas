@@ -126,9 +126,10 @@ pub struct TypedChunk {
 #[derive(Debug, Clone)]
 struct ChunkBuilder {
     src: String,
-    local_scope: HashMap<String, ConstraintSet>,
     scopes: HashMap<usize, HashMap<String, ConstraintSet>>,
     type_constraints: HashMap<usize, ExpList>,
+
+    local_scope: HashMap<String, ConstraintSet>,
     free_variables: HashMap<String, ConstraintSet>,
     provided_globals: HashMap<String, ConstraintSet>,
 }
@@ -190,9 +191,6 @@ impl ChunkBuilder {
             );
 
             match statement.kind() {
-                // @Todo: global environment
-                // @Note: This could either be assigning a global,
-                // or modifying a previously-declared local.
                 "variable_assignment" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     let names = self.list(var_list);
@@ -218,12 +216,8 @@ impl ChunkBuilder {
                     let saved_scope = self.local_scope.clone();
 
                     if let Some(body) = statement.child_by_field_name("body") {
-                        let types = self.typecheck_block(body);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(body);
+                        return_type.combine(return_list);
                     }
 
                     self.local_scope = saved_scope;
@@ -241,12 +235,8 @@ impl ChunkBuilder {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        let types = self.typecheck_block(body);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(body);
+                        return_type.combine(return_list);
                     }
 
                     self.local_scope = saved_scope;
@@ -257,12 +247,8 @@ impl ChunkBuilder {
 
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
-                        let types = self.typecheck_block(body);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(body);
+                        return_type.combine(return_list);
                     }
 
                     // until
@@ -304,12 +290,8 @@ impl ChunkBuilder {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        let types = self.typecheck_block(body);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(body);
+                        return_type.combine(return_list);
                     }
 
                     self.local_scope = saved_scope;
@@ -349,12 +331,8 @@ impl ChunkBuilder {
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
-                        let types = self.typecheck_block(body);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(body);
+                        return_type.combine(return_list);
                     }
 
                     self.local_scope = saved_scope;
@@ -377,12 +355,8 @@ impl ChunkBuilder {
                     if let Some(consequence) = statement.child_by_field_name("consequence") {
                         let saved_scope = self.local_scope.clone();
 
-                        let types = self.typecheck_block(consequence);
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.typecheck_block(consequence);
+                        return_type.combine(return_list);
 
                         self.local_scope = saved_scope;
                     }
@@ -399,12 +373,8 @@ impl ChunkBuilder {
                             if let Some(consequence) = elseif.child_by_field_name("consequence") {
                                 let saved_scope = self.local_scope.clone();
 
-                                let types = self.typecheck_block(consequence);
-                                for (constraints, new_constraints) in
-                                    return_type.0.iter_mut().zip(types.0.into_iter())
-                                {
-                                    constraints.0.extend(new_constraints.0);
-                                }
+                                let return_list = self.typecheck_block(consequence);
+                                return_type.combine(return_list);
 
                                 self.local_scope = saved_scope;
                             }
@@ -412,12 +382,8 @@ impl ChunkBuilder {
                         } else if let Some(body) = elseif.child_by_field_name("body") {
                             let saved_scope = self.local_scope.clone();
 
-                            let types = self.typecheck_block(body);
-                            for (constraints, new_constraints) in
-                                return_type.0.iter_mut().zip(types.0.into_iter())
-                            {
-                                constraints.0.extend(new_constraints.0);
-                            }
+                            let return_list = self.typecheck_block(body);
+                            return_type.combine(return_list);
 
                             self.local_scope = saved_scope;
                         }
@@ -459,19 +425,8 @@ impl ChunkBuilder {
                 // but possibly we could still check some stuff after the return statement.
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
-                        let types = self.explist(exp_list);
-
-                        if return_type.0.len() < types.0.len() {
-                            return_type
-                                .0
-                                .resize(types.0.len(), ConstraintSet::default());
-                        }
-
-                        for (constraints, new_constraints) in
-                            return_type.0.iter_mut().zip(types.0.into_iter())
-                        {
-                            constraints.0.extend(new_constraints.0);
-                        }
+                        let return_list = self.explist(exp_list);
+                        return_type.combine(return_list);
                     } else {
                         // `return;` means `return nil;`
                         return_type
@@ -562,13 +517,41 @@ impl ChunkBuilder {
             // @Todo: check the type of the operand (here? or elsewhere?)
             "unary_expression" => {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
+                let operand = expr.child_by_field_name("argument").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "-" | "#" => vec![Type::Number.into()].into(),
+                    "-" => {
+                        self.constrain(
+                            operand,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
+
+                    "#" => {
+                        self.constrain(
+                            operand,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::Or(vec![
+                                Constraint::IsType(Type::Table),
+                                Constraint::IsType(Type::String),
+                            ])])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
 
                     // integer
                     // @Todo: not Type::Number
-                    "~" => vec![Type::Number.into()].into(),
+                    "~" => {
+                        self.constrain(
+                            operand,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
 
                     // bool
                     "not" => vec![Type::Boolean.into()].into(),
@@ -581,15 +564,92 @@ impl ChunkBuilder {
             // @Todo: check the type of the operands (here? or elsewhere?)
             "binary_expression" => {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
+                let left = expr.child_by_field_name("left").expect("non-optional");
+                let right = expr.child_by_field_name("right").expect("non-optional");
                 match &self.src[operator.byte_range()] {
                     // number
-                    "+" | "-" | "*" | "//" | "%" => vec![Type::Number.into()].into(),
+                    "+" | "-" | "*" | "//" | "%" => {
+                        self.constrain(
+                            left,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        self.constrain(
+                            right,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
 
                     // float
-                    "/" | "^" => vec![Type::Number.into()].into(),
+                    // @Todo: not Type::Number
+                    "/" | "^" => {
+                        self.constrain(
+                            left,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        self.constrain(
+                            right,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
 
                     // bool
-                    "==" | "~=" | "<" | ">" | "<=" | ">=" => vec![Type::Boolean.into()].into(),
+                    "==" | "~=" | "<" | ">" | "<=" | ">=" => {
+                        // @Checkme: is this always right?
+                        // Might want to do some analysis to work out
+                        // which type is more general or something,
+                        // and constrain only in one direction.
+                        let left_explist = self.typecheck_expression(left);
+                        let right_explist = self.typecheck_expression(right);
+                        self.constrain(left, right_explist);
+                        self.constrain(right, left_explist);
+
+                        vec![Type::Boolean.into()].into()
+                    }
+
+                    // integer
+                    // @Todo: not Type::Number
+                    "|" | "~" | "&" | "<<" | ">>" => {
+                        self.constrain(
+                            left,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        self.constrain(
+                            right,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
+                        vec![Type::Number.into()].into()
+                    }
+
+                    // string
+                    ".." => {
+                        self.constrain(
+                            left,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::String
+                            )])]),
+                        );
+                        self.constrain(
+                            right,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::String
+                            )])]),
+                        );
+                        vec![Type::String.into()].into()
+                    }
 
                     // short-circuiting
                     //
@@ -620,13 +680,6 @@ impl ChunkBuilder {
                         types.0.truncate(1);
                         types
                     }
-
-                    // integer
-                    // @Todo: not Type::Number
-                    "|" | "~" | "&" | "<<" | ">>" => vec![Type::Number.into()].into(),
-
-                    // string
-                    ".." => vec![Type::String.into()].into(),
 
                     _ => unreachable!(),
                 }
@@ -720,6 +773,37 @@ impl ChunkBuilder {
         }
 
         types
+    }
+
+    /// Constrains the given node to include the constraints in the given [`ExpList`].
+    /// Also, if the node represents a variable,
+    /// adds the first constraint to the variable scope as well.
+    fn constrain(&mut self, expr: Node, explist: ExpList) {
+        if explist.0.is_empty() {
+            // nothing to add
+            return;
+        }
+
+        // Add the first constraint to the variable's set,
+        // if it is indeed a variable.
+        if expr.kind() == "variable" {
+            let var = &self.src[expr.byte_range()];
+            if let Some(constraint_set) = self
+                .local_scope
+                .get_mut(var)
+                .or_else(|| self.provided_globals.get_mut(var))
+                .or_else(|| self.free_variables.get_mut(var))
+            {
+                constraint_set.0.extend(explist.0[0].0.clone().into_iter());
+            } else {
+                // @Todo @Checkme: what happens here? When does this occur?
+                log::warn!("Possibly should do a scope error or something");
+            }
+        }
+
+        // Add the constraints to the expression's sets.
+        let existing_explist = self.type_constraints.entry(expr.id()).or_default();
+        existing_explist.combine(explist);
     }
 
     /// Adds the given variables to the local scope
@@ -823,6 +907,20 @@ pub struct ExpList(Vec<ConstraintSet>);
 impl ExpList {
     fn new() -> Self {
         ExpList(Vec::new())
+    }
+
+    /// Combines the constraints of two `ExpList`s.
+    fn combine(&mut self, other: ExpList) {
+        // Resize `self` so that it's at least as long as `other`
+        if self.0.len() < other.0.len() {
+            self.0.resize(other.0.len(), ConstraintSet::default());
+        }
+
+        // For each item in the lists (item-wise),
+        // extend the set in `self` with the new constraints from `other`.
+        for (constraints, new_constraints) in self.0.iter_mut().zip(other.0.into_iter()) {
+            constraints.0.extend(new_constraints.0);
+        }
     }
 }
 
