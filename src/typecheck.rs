@@ -1,6 +1,5 @@
 use std::fmt::{self, Display};
 use std::fs;
-use std::iter;
 use std::path::Path;
 
 use im::{HashMap, HashSet};
@@ -8,6 +7,7 @@ use itertools::Itertools;
 use tree_sitter::{Node, Tree};
 
 use crate::error::IncludeError;
+use crate::scope::Scope;
 
 /// A struct representing a typechecking context.
 /// That is, all the files containing code to be typechecked,
@@ -103,7 +103,7 @@ pub struct TypedChunk {
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the type environment at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
-    pub scopes: HashMap<usize, HashMap<String, ConstraintSet>>,
+    pub scopes: HashMap<usize, Scope>,
 
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the set of type constraints upon the expression at that node.
@@ -112,10 +112,10 @@ pub struct TypedChunk {
 
     /// The set of all free variables in the chunk.
     /// These are usually translated to global variable accesses.
-    pub free_variables: HashMap<String, ConstraintSet>,
+    pub free_variables: Scope,
 
     /// The set of all assigned globals in the chunk.
-    pub provided_globals: HashMap<String, ConstraintSet>,
+    pub provided_globals: Scope,
 
     /// The return type of the chunk.
     pub return_type: ExpList,
@@ -126,12 +126,12 @@ pub struct TypedChunk {
 #[derive(Debug, Clone)]
 struct ChunkBuilder {
     src: String,
-    scopes: HashMap<usize, HashMap<String, ConstraintSet>>,
+    scopes: HashMap<usize, Scope>,
     type_constraints: HashMap<usize, ExpList>,
 
-    local_scope: HashMap<String, ConstraintSet>,
-    free_variables: HashMap<String, ConstraintSet>,
-    provided_globals: HashMap<String, ConstraintSet>,
+    local_scope: Scope,
+    free_variables: Scope,
+    provided_globals: Scope,
 }
 
 impl TypedChunk {
@@ -141,12 +141,12 @@ impl TypedChunk {
         let mut builder = ChunkBuilder {
             src,
 
-            local_scope: HashMap::new(),
-
             scopes: HashMap::new(),
             type_constraints: HashMap::new(),
-            free_variables: HashMap::new(),
-            provided_globals: HashMap::new(),
+
+            local_scope: Scope::default(),
+            free_variables: Scope::default(),
+            provided_globals: Scope::default(),
         };
 
         let return_type = builder.typecheck_block(tree.root_node());
@@ -806,16 +806,14 @@ impl ChunkBuilder {
         existing_explist.combine(explist);
     }
 
-    /// Adds the given variables to the local scope
-    /// (with the uninitialized type).
+    /// Adds the given variables to the local scope.
     ///
     /// As in, `local foo`.
     fn declare_local<I>(&mut self, names: I)
     where
         I: IntoIterator<Item = String>,
     {
-        self.local_scope
-            .extend(names.into_iter().zip(iter::repeat(Type::Uninitialized)));
+        self.local_scope.extend(names);
     }
 
     /// Assigns the given variables to have the types according to the given expressions.
@@ -886,7 +884,7 @@ impl Display for Type {
 
             // Parametric types
             Function { arguments, returns } => {
-                write!(f, "(({arguments:?}) -> {returns:?})",)
+                write!(f, "(({arguments}) -> {returns})")
             }
 
             Thread => write!(f, "thread"),
@@ -906,7 +904,7 @@ pub struct ExpList(Vec<ConstraintSet>);
 
 impl ExpList {
     fn new() -> Self {
-        ExpList(Vec::new())
+        ExpList::default()
     }
 
     /// Combines the constraints of two `ExpList`s.
@@ -932,7 +930,13 @@ impl From<Vec<ConstraintSet>> for ExpList {
 
 impl Display for ExpList {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "{}", self.0.iter().join(", "))
+        if self.0.is_empty() {
+            // @Cleanup: Is this the best spot for this logic?
+            // Feels a bit wrong to have this be in the Display impl.
+            write!(f, "nil")
+        } else {
+            write!(f, "{}", self.0.iter().join(", "))
+        }
     }
 }
 
@@ -963,8 +967,8 @@ impl Display for Constraint {
         use Constraint::*;
         match self {
             IsType(typ) => typ.fmt(f),
-            And(constraints) => write!(f, "({})", constraints.iter().join(" & ")),
-            Or(constraints) => write!(f, "({})", constraints.iter().join(" | ")),
+            And(constraints) => write!(f, "{}", constraints.iter().join(" & ")),
+            Or(constraints) => write!(f, "{}", constraints.iter().join(" | ")),
         }
     }
 }
@@ -992,6 +996,12 @@ impl From<Type> for ConstraintSet {
 
 impl Display for ConstraintSet {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(f, "({})", self.0.iter().join(" & "))
+        if self.0.is_empty() {
+            // @Cleanup: Is this the best spot for this logic?
+            // Feels a bit wrong to have this be in the Display impl.
+            write!(f, "any")
+        } else {
+            write!(f, "{}", self.0.iter().join(" & "))
+        }
     }
 }

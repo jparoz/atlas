@@ -22,12 +22,9 @@ fn main() {
     let id = FileID::from(&args.file);
     let (_tree, chunk) = &typechecker.files[&id];
 
+    log::info!("Chunk closes over the variables: {}", chunk.free_variables);
     log::info!(
-        "Chunk closes over the variables: {:?}",
-        chunk.free_variables
-    );
-    log::info!(
-        "Chunk assigns the following global variables: {:?}",
+        "Chunk assigns the following global variables: {}",
         chunk.provided_globals
     );
     log::info!("Chunk return type: {}", chunk.return_type);
