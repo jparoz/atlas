@@ -60,6 +60,7 @@ dependencies = [
  "im",
  "itertools",
  "log",
+ "nonempty",
  "thiserror",
  "tree-sitter",
  "tree-sitter-lua",
@@ -299,6 +300,12 @@ name = "memchr"
 version = "2.5.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "2dffe52ecf27772e601905b7522cb4ef790d2cc203488bbd0e2fe85fcb74566d"
+
+[[package]]
+name = "nonempty"
+version = "0.8.1"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "aeaf4ad7403de93e699c191202f017118df734d3850b01e13a3a8b2e6953d3c9"
 
 [[package]]
 name = "once_cell"

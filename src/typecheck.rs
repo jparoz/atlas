@@ -213,18 +213,18 @@ impl ChunkBuilder {
                 }
 
                 "do_statement" => {
-                    let saved_scope = self.local_scope.clone();
+                    self.local_scope.open_scope();
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope = saved_scope;
+                    self.local_scope.close_scope();
                 }
 
                 "while_statement" => {
-                    let saved_scope = self.local_scope.clone();
+                    self.local_scope.open_scope();
 
                     // while
                     let condition = statement
@@ -239,11 +239,11 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope = saved_scope;
+                    self.local_scope.close_scope();
                 }
 
                 "repeat_statement" => {
-                    let saved_scope = self.local_scope.clone();
+                    self.local_scope.open_scope();
 
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -258,12 +258,12 @@ impl ChunkBuilder {
                     let condition_type = self.typecheck_expression(condition);
                     // @Todo: something with condition_type
 
-                    self.local_scope = saved_scope;
+                    self.local_scope.close_scope();
                 }
 
                 // for name = start, end [, step] do [body] end
                 "for_numeric_statement" => {
-                    let saved_scope = self.local_scope.clone();
+                    self.local_scope.open_scope();
 
                     let name = statement.child_by_field_name("name").expect("non-optional");
                     let name_str = self.src[name.byte_range()].to_string();
@@ -294,14 +294,14 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope = saved_scope;
+                    self.local_scope.close_scope();
                 }
 
                 // for left in right do [body] end
                 //   left: variable_list
                 //   right: expression_list
                 "for_generic_statement" => {
-                    let saved_scope = self.local_scope.clone();
+                    self.local_scope.open_scope();
 
                     // @XXX @Fixme @Todo:
                     // This is wrong!
@@ -335,7 +335,7 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope = saved_scope;
+                    self.local_scope.close_scope();
                 }
 
                 "if_statement" => {
@@ -353,12 +353,12 @@ impl ChunkBuilder {
 
                     // then [consequence]
                     if let Some(consequence) = statement.child_by_field_name("consequence") {
-                        let saved_scope = self.local_scope.clone();
+                        self.local_scope.open_scope();
 
                         let return_list = self.typecheck_block(consequence);
                         return_type.combine(return_list);
 
-                        self.local_scope = saved_scope;
+                        self.local_scope.close_scope();
                     }
 
                     let mut cursor = statement.walk();
@@ -371,21 +371,21 @@ impl ChunkBuilder {
 
                             // then [consequence]
                             if let Some(consequence) = elseif.child_by_field_name("consequence") {
-                                let saved_scope = self.local_scope.clone();
+                                self.local_scope.open_scope();
 
                                 let return_list = self.typecheck_block(consequence);
                                 return_type.combine(return_list);
 
-                                self.local_scope = saved_scope;
+                                self.local_scope.close_scope();
                             }
                         // [else [body]]
                         } else if let Some(body) = elseif.child_by_field_name("body") {
-                            let saved_scope = self.local_scope.clone();
+                            self.local_scope.open_scope();
 
                             let return_list = self.typecheck_block(body);
                             return_type.combine(return_list);
 
-                            self.local_scope = saved_scope;
+                            self.local_scope.close_scope();
                         }
                     }
                 }
@@ -696,7 +696,7 @@ impl ChunkBuilder {
 
     /// Typecheck a function (either a \[local] definition or an anonymous function expression).
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
-        let saved_scope = self.local_scope.clone();
+        self.local_scope.open_scope();
 
         let mut argument_names = Vec::new();
 
@@ -737,7 +737,7 @@ impl ChunkBuilder {
             arguments.0.push(constraints);
         }
 
-        self.local_scope = saved_scope;
+        self.local_scope.close_scope();
 
         let typ = Type::Function { arguments, returns };
         log::trace!("Function has type: {typ}");
@@ -837,15 +837,15 @@ impl ChunkBuilder {
         I: IntoIterator<Item = String>,
         T: IntoIterator<Item = ConstraintSet>,
     {
-        for (name, constraints) in names.into_iter().zip(cons_sets.into_iter()) {
-            if self.local_scope.contains_key(&name) {
+        for (name, new_constraints) in names.into_iter().zip(cons_sets.into_iter()) {
+            if let Some(constraints) = self.local_scope.get_mut(&name) {
                 // If it's been declared as a local,
                 // then overwrite the type of that local.
-                self.local_scope.insert(name, constraints);
+                *constraints = new_constraints;
             } else {
                 // If it's not a local,
                 // mark that this chunk assigns a global variable of this name and type.
-                self.provided_globals.insert(name, constraints);
+                self.provided_globals.insert(name, new_constraints);
             }
         }
     }
