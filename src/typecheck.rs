@@ -274,18 +274,34 @@ impl ChunkBuilder {
                         .child_by_field_name("start")
                         .expect("non-optional");
                     let start_type = self.typecheck_expression(start);
-                    // @Todo: check that start can be converted to a number
+                    self.constrain(
+                        start,
+                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                            Type::Number
+                        )])]),
+                    );
 
                     // @Note: Numerical for loops convert their arguments to numbers,
                     // so the bound variable is guaranteed to have the type `number`
                     // (either integer or float; see section 3.3.5 of Lua 5.4 manual).
-                    self.local_scope.insert(name_str, Type::Number.into());
+                    self.local_scope
+                        .declare_and_assign(name_str, Type::Number.into());
 
                     let end = statement.child_by_field_name("end").expect("non-optional");
-                    // @Todo: check that end can be converted to a number
+                    self.constrain(
+                        end,
+                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                            Type::Number
+                        )])]),
+                    );
 
                     if let Some(step) = statement.child_by_field_name("step") {
-                        // @Todo: check that step can be converted to a number
+                        self.constrain(
+                            step,
+                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                                Type::Number
+                            )])]),
+                        );
                     }
 
                     // do
@@ -319,15 +335,31 @@ impl ChunkBuilder {
                     // and the control variable.
                     // The results from this call are then assigned to the loop variables,
                     // following the rules of multiple assignments.
-                    let var_list = statement.child_by_field_name("left").expect("non-optional");
-                    let names = self.list(var_list);
 
-                    let expr_list = statement
+                    let right = statement
                         .child_by_field_name("right")
                         .expect("non-optional");
-                    let types = self.explist(expr_list);
+                    let mut explist = self.explist(right);
+                    explist.0.resize(4, ConstraintSet::default());
+                    let state = explist.0.get(1).unwrap();
+                    let initial_control = explist.0.get(2).unwrap();
 
-                    self.assign(names, types.0);
+                    // This is the explist of the minimal type for
+                    // the iterator function of a generic for loop.
+                    let iterator_type =
+                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
+                            Type::Function {
+                                arguments: ExpList(vec![state.clone(), initial_control.clone()]),
+                                // Default makes no assumptions about the return type
+                                returns: ExpList::default(),
+                            }
+                        )])]);
+                    explist.combine(iterator_type);
+
+                    let left = statement.child_by_field_name("left").expect("non-optional");
+                    let names = self.list(left);
+                    self.declare_local(names.clone());
+                    self.assign(names, explist.0);
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -480,7 +512,7 @@ impl ChunkBuilder {
                     // @Todo @XXX: input type variables??
                     let constraints = ConstraintSet::new();
                     self.free_variables
-                        .insert(var_str.to_string(), constraints.clone());
+                        .declare_and_assign(var_str.to_string(), constraints.clone());
                     vec![constraints].into()
                 }
             }
@@ -787,7 +819,7 @@ impl ChunkBuilder {
     /// Constrains the given node to include the constraints in the given [`ExpList`].
     /// Also, if the node represents a variable,
     /// adds the first constraint to the variable scope as well.
-    fn constrain(&mut self, expr: Node, explist: ExpList) {
+    fn constrain(&mut self, expr: Node, mut explist: ExpList) {
         if explist.0.is_empty() {
             // nothing to add
             return;
@@ -805,8 +837,11 @@ impl ChunkBuilder {
             {
                 constraint_set.0.extend(explist.0[0].0.clone().into_iter());
             } else {
-                // @Todo @Checkme: what happens here? When does this occur?
-                log::warn!("Possibly should do a scope error or something");
+                // It's not in scope,
+                // so it should be a new global.
+                // @Todo @Cleanup: abstract all this into Scope somehow. It's also repeated (@DRY).
+                self.free_variables
+                    .declare_and_assign(var.to_string(), explist.0.remove(0));
             }
         }
 
@@ -845,7 +880,8 @@ impl ChunkBuilder {
             } else {
                 // If it's not a local,
                 // mark that this chunk assigns a global variable of this name and type.
-                self.provided_globals.insert(name, new_constraints);
+                self.provided_globals
+                    .declare_and_assign(name, new_constraints);
             }
         }
     }

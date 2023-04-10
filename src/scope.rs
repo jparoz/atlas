@@ -42,7 +42,9 @@ impl Scope {
             .insert(name, ConstraintSet::default());
     }
 
-    pub fn insert(&mut self, k: String, v: ConstraintSet) -> Option<ConstraintSet> {
+    /// Adds a new variable to the scope with the type given by the constraint set,
+    /// as in `local foo = 123`.
+    pub fn declare_and_assign(&mut self, k: String, v: ConstraintSet) -> Option<ConstraintSet> {
         self.subscopes.last_mut().insert(k, v)
     }
 
