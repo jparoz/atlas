@@ -546,7 +546,6 @@ impl ChunkBuilder {
             "vararg_expression" => todo!(),
 
             // @Todo: handle metatables
-            // @Todo: check the type of the operand (here? or elsewhere?)
             "unary_expression" => {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 let operand = expr.child_by_field_name("argument").expect("non-optional");
@@ -593,7 +592,6 @@ impl ChunkBuilder {
             }
 
             // @Todo: handle metatables
-            // @Todo: check the type of the operands (here? or elsewhere?)
             "binary_expression" => {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 let left = expr.child_by_field_name("left").expect("non-optional");
