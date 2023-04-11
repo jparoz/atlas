@@ -129,6 +129,9 @@ struct ChunkBuilder {
     scopes: HashMap<usize, Scope>,
     type_constraints: HashMap<usize, ExpList>,
 
+    // @Todo @Cleanup: combine these in some way
+    // (maybe change `local_scope` to just `scope`,
+    // which includes globals in some new way)
     local_scope: Scope,
     free_variables: Scope,
     provided_globals: Scope,
@@ -144,7 +147,7 @@ impl TypedChunk {
             scopes: HashMap::new(),
             type_constraints: HashMap::new(),
 
-            local_scope: Scope::default(),
+            local_scope: Scope::new_top_level(),
             free_variables: Scope::default(),
             provided_globals: Scope::default(),
         };
@@ -191,6 +194,14 @@ impl ChunkBuilder {
             );
 
             match statement.kind() {
+                // @Todo: transitive type constraints somehow, e.g.:
+                //     function Foobar(a)
+                //         local b = a
+                //         local res = b + 1
+                //         return res
+                //     end
+                // should constrain `a` to be type `number`,
+                // but it only constrains `b` (which is internal to the function).
                 "variable_assignment" => {
                     let var_list = statement.named_child(0).expect("non-optional");
                     let names = self.list(var_list);
@@ -268,7 +279,6 @@ impl ChunkBuilder {
                     let name = statement.child_by_field_name("name").expect("non-optional");
                     let name_str = self.src[name.byte_range()].to_string();
 
-                    // @Todo: the numerical for converts its arguments to numbers.
                     // See section 3.3.5 of Lua 5.4 manual.
                     let start = statement
                         .child_by_field_name("start")
@@ -319,10 +329,7 @@ impl ChunkBuilder {
                 "for_generic_statement" => {
                     self.local_scope.open_scope();
 
-                    // @XXX @Fixme @Todo:
-                    // This is wrong!
-                    // It should do the following
-                    // (taken fron the Lua 5.4 manual, section 3.3.5):
+                    // From the Lua 5.4 manual, section 3.3.5:
                     //
                     // The loop starts by evaluating explist to produce four values:
                     // an iterator function,
@@ -539,11 +546,13 @@ impl ChunkBuilder {
                 types
             }
 
-            // @Todo: probably need a specific type for varargs;
-            // similar to a list type,
-            // similar to a multiple return type,
-            // but a bit different to both.
-            "vararg_expression" => todo!(),
+            "vararg_expression" => {
+                if let Some(varargs_explist) = self.local_scope.varargs_mut() {
+                    varargs_explist.clone()
+                } else {
+                    todo!("@Todo: scope error (not a varargs function)")
+                }
+            }
 
             // @Todo: handle metatables
             "unary_expression" => {
@@ -825,22 +834,36 @@ impl ChunkBuilder {
 
         // Add the first constraint to the variable's set,
         // if it is indeed a variable.
-        if expr.kind() == "variable" {
-            let var = &self.src[expr.byte_range()];
-            if let Some(constraint_set) = self
-                .local_scope
-                .get_mut(var)
-                .or_else(|| self.provided_globals.get_mut(var))
-                .or_else(|| self.free_variables.get_mut(var))
-            {
-                constraint_set.0.extend(explist.0[0].0.clone().into_iter());
-            } else {
-                // It's not in scope,
-                // so it should be a new global.
-                // @Todo @Cleanup: abstract all this into Scope somehow. It's also repeated (@DRY).
-                self.free_variables
-                    .declare_and_assign(var.to_string(), explist.0.remove(0));
+        match expr.kind() {
+            "variable" => {
+                let var = &self.src[expr.byte_range()];
+                if let Some(constraint_set) = self
+                    .local_scope
+                    .get_mut(var)
+                    .or_else(|| self.provided_globals.get_mut(var))
+                    .or_else(|| self.free_variables.get_mut(var))
+                {
+                    constraint_set.0.extend(explist.0[0].0.clone().into_iter());
+                } else {
+                    // It's not in scope,
+                    // so it should be a new global.
+                    // @Todo @Cleanup:
+                    // abstract all this into Scope somehow.
+                    // It's also repeated (@DRY).
+                    self.free_variables
+                        .declare_and_assign(var.to_string(), explist.0.remove(0));
+                }
             }
+
+            "varargs_expression" => {
+                if let Some(varargs_explist) = self.local_scope.varargs_mut() {
+                    varargs_explist.combine(explist.clone());
+                } else {
+                    todo!("@Todo: scope error (not a varargs function)")
+                }
+            }
+
+            _ => (),
         }
 
         // Add the constraints to the expression's sets.
