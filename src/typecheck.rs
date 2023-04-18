@@ -105,17 +105,13 @@ pub struct TypedChunk {
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
     pub scopes: HashMap<usize, Scope>,
 
+    /// The scope at the end of the top level of the chunk.
+    pub scope: Scope,
+
     /// A map from a tree-sitter [`Node`]'s ID
     /// to the set of type constraints upon the expression at that node.
     /// The IDs used are from the tree-sitter [`Tree`] given to [`TypedChunk::new`].
     pub type_constraints: HashMap<usize, ExpList>,
-
-    /// The set of all free variables in the chunk.
-    /// These are usually translated to global variable accesses.
-    pub free_variables: Scope,
-
-    /// The set of all assigned globals in the chunk.
-    pub provided_globals: Scope,
 
     /// The return type of the chunk.
     pub return_type: ExpList,
@@ -127,14 +123,8 @@ pub struct TypedChunk {
 struct ChunkBuilder {
     src: String,
     scopes: HashMap<usize, Scope>,
+    scope: Scope,
     type_constraints: HashMap<usize, ExpList>,
-
-    // @Todo @Cleanup: combine these in some way
-    // (maybe change `local_scope` to just `scope`,
-    // which includes globals in some new way)
-    local_scope: Scope,
-    free_variables: Scope,
-    provided_globals: Scope,
 }
 
 impl TypedChunk {
@@ -143,13 +133,9 @@ impl TypedChunk {
     pub fn new(tree: &Tree, src: String) -> Self {
         let mut builder = ChunkBuilder {
             src,
-
             scopes: HashMap::new(),
+            scope: Scope::new_top_level(),
             type_constraints: HashMap::new(),
-
-            local_scope: Scope::new_top_level(),
-            free_variables: Scope::default(),
-            provided_globals: Scope::default(),
         };
 
         let return_type = builder.typecheck_block(tree.root_node());
@@ -157,17 +143,14 @@ impl TypedChunk {
         let ChunkBuilder {
             src,
             scopes,
+            scope,
             type_constraints,
-            free_variables,
-            provided_globals,
-            ..
         } = builder;
         TypedChunk {
             src,
             scopes,
+            scope,
             type_constraints,
-            free_variables,
-            provided_globals,
             return_type,
         }
     }
@@ -184,8 +167,8 @@ impl ChunkBuilder {
         let mut cursor = block.walk();
         for statement in block.named_children(&mut cursor) {
             // Save the current state of the type environment.
-            log::trace!("local scope:\n{:?}", self.local_scope);
-            self.scopes.insert(statement.id(), self.local_scope.clone());
+            log::trace!("scope:\n{}", self.scope);
+            self.scopes.insert(statement.id(), self.scope.clone());
 
             log::trace!(
                 "Processing statement (kind == {kind}):\n{src}",
@@ -203,6 +186,8 @@ impl ChunkBuilder {
                 // should constrain `a` to be type `number`,
                 // but it only constrains `b` (which is internal to the function).
                 "variable_assignment" => {
+                    // @Todo: Handle table variables (table.field and table[index]),
+                    // either here or in self.assign
                     let var_list = statement.named_child(0).expect("non-optional");
                     let names = self.list(var_list);
 
@@ -224,18 +209,18 @@ impl ChunkBuilder {
                 }
 
                 "do_statement" => {
-                    self.local_scope.open_scope();
+                    self.scope.open_scope();
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope.close_scope();
+                    self.scope.close_scope();
                 }
 
                 "while_statement" => {
-                    self.local_scope.open_scope();
+                    self.scope.open_scope();
 
                     // while
                     let condition = statement
@@ -250,11 +235,11 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope.close_scope();
+                    self.scope.close_scope();
                 }
 
                 "repeat_statement" => {
-                    self.local_scope.open_scope();
+                    self.scope.open_scope();
 
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
@@ -269,12 +254,12 @@ impl ChunkBuilder {
                     let condition_type = self.typecheck_expression(condition);
                     // @Todo: something with condition_type
 
-                    self.local_scope.close_scope();
+                    self.scope.close_scope();
                 }
 
                 // for name = start, end [, step] do [body] end
                 "for_numeric_statement" => {
-                    self.local_scope.open_scope();
+                    self.scope.open_scope();
 
                     let name = statement.child_by_field_name("name").expect("non-optional");
                     let name_str = self.src[name.byte_range()].to_string();
@@ -294,8 +279,7 @@ impl ChunkBuilder {
                     // @Note: Numerical for loops convert their arguments to numbers,
                     // so the bound variable is guaranteed to have the type `number`
                     // (either integer or float; see section 3.3.5 of Lua 5.4 manual).
-                    self.local_scope
-                        .declare_and_assign(name_str, Type::Number.into());
+                    self.scope.declare_and_assign(name_str, Type::Number.into());
 
                     let end = statement.child_by_field_name("end").expect("non-optional");
                     self.constrain(
@@ -320,14 +304,14 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope.close_scope();
+                    self.scope.close_scope();
                 }
 
                 // for left in right do [body] end
                 //   left: variable_list
                 //   right: expression_list
                 "for_generic_statement" => {
-                    self.local_scope.open_scope();
+                    self.scope.open_scope();
 
                     // From the Lua 5.4 manual, section 3.3.5:
                     //
@@ -374,7 +358,7 @@ impl ChunkBuilder {
                         return_type.combine(return_list);
                     }
 
-                    self.local_scope.close_scope();
+                    self.scope.close_scope();
                 }
 
                 "if_statement" => {
@@ -392,12 +376,12 @@ impl ChunkBuilder {
 
                     // then [consequence]
                     if let Some(consequence) = statement.child_by_field_name("consequence") {
-                        self.local_scope.open_scope();
+                        self.scope.open_scope();
 
                         let return_list = self.typecheck_block(consequence);
                         return_type.combine(return_list);
 
-                        self.local_scope.close_scope();
+                        self.scope.close_scope();
                     }
 
                     let mut cursor = statement.walk();
@@ -410,21 +394,21 @@ impl ChunkBuilder {
 
                             // then [consequence]
                             if let Some(consequence) = elseif.child_by_field_name("consequence") {
-                                self.local_scope.open_scope();
+                                self.scope.open_scope();
 
                                 let return_list = self.typecheck_block(consequence);
                                 return_type.combine(return_list);
 
-                                self.local_scope.close_scope();
+                                self.scope.close_scope();
                             }
                         // [else [body]]
                         } else if let Some(body) = elseif.child_by_field_name("body") {
-                            self.local_scope.open_scope();
+                            self.scope.open_scope();
 
                             let return_list = self.typecheck_block(body);
                             return_type.combine(return_list);
 
-                            self.local_scope.close_scope();
+                            self.scope.close_scope();
                         }
                     }
                 }
@@ -484,7 +468,7 @@ impl ChunkBuilder {
             }
         }
 
-        log::trace!("Block return type: {return_type:?}");
+        log::trace!("Block return type: {return_type}");
 
         return_type
     }
@@ -509,18 +493,11 @@ impl ChunkBuilder {
             // Variable references
             "variable" => {
                 let var_str = &self.src[expr.byte_range()];
-                if let Some(local) = self.local_scope.get(var_str) {
-                    vec![local.clone()].into()
-                } else if let Some(global_defined_here) = self.provided_globals.get(var_str) {
-                    vec![global_defined_here.clone()].into()
-                } else if let Some(global_already_referenced) = self.free_variables.get(var_str) {
-                    vec![global_already_referenced.clone()].into()
+                if let Some(constraint_set) = self.scope.get(var_str) {
+                    vec![constraint_set.clone()].into()
                 } else {
-                    // @Todo @XXX: input type variables??
-                    let constraints = ConstraintSet::new();
-                    self.free_variables
-                        .declare_and_assign(var_str.to_string(), constraints.clone());
-                    vec![constraints].into()
+                    self.scope.assume_global(var_str.to_string());
+                    vec![ConstraintSet::default()].into()
                 }
             }
 
@@ -547,7 +524,7 @@ impl ChunkBuilder {
             }
 
             "vararg_expression" => {
-                if let Some(varargs_explist) = self.local_scope.varargs_mut() {
+                if let Some(varargs_explist) = self.scope.varargs_mut() {
                     varargs_explist.clone()
                 } else {
                     todo!("@Todo: scope error (not a varargs function)")
@@ -735,7 +712,7 @@ impl ChunkBuilder {
 
     /// Typecheck a function (either a \[local] definition or an anonymous function expression).
     pub fn typecheck_function(&mut self, function_body: Node) -> Type {
-        self.local_scope.open_scope();
+        self.scope.open_scope();
 
         let mut argument_names = Vec::new();
 
@@ -770,13 +747,13 @@ impl ChunkBuilder {
         let mut arguments = ExpList::new();
         for name in argument_names {
             let constraints = self
-                .local_scope
+                .scope
                 .remove(&name)
                 .expect("declare_local should have inserted this key");
             arguments.0.push(constraints);
         }
 
-        self.local_scope.close_scope();
+        self.scope.close_scope();
 
         let typ = Type::Function { arguments, returns };
         log::trace!("Function has type: {typ}");
@@ -826,7 +803,7 @@ impl ChunkBuilder {
     /// Constrains the given node to include the constraints in the given [`ExpList`].
     /// Also, if the node represents a variable,
     /// adds the first constraint to the variable scope as well.
-    fn constrain(&mut self, expr: Node, mut explist: ExpList) {
+    fn constrain(&mut self, expr: Node, explist: ExpList) {
         if explist.0.is_empty() {
             // nothing to add
             return;
@@ -837,26 +814,15 @@ impl ChunkBuilder {
         match expr.kind() {
             "variable" => {
                 let var = &self.src[expr.byte_range()];
-                if let Some(constraint_set) = self
-                    .local_scope
-                    .get_mut(var)
-                    .or_else(|| self.provided_globals.get_mut(var))
-                    .or_else(|| self.free_variables.get_mut(var))
-                {
-                    constraint_set.0.extend(explist.0[0].0.clone().into_iter());
-                } else {
-                    // It's not in scope,
-                    // so it should be a new global.
-                    // @Todo @Cleanup:
-                    // abstract all this into Scope somehow.
-                    // It's also repeated (@DRY).
-                    self.free_variables
-                        .declare_and_assign(var.to_string(), explist.0.remove(0));
+                if !self.scope.contains_key(var) {
+                    self.scope.assume_global(var.to_string());
                 }
+                let constraint_set = self.scope.get_mut(var).unwrap();
+                constraint_set.0.extend(explist.0[0].0.clone().into_iter());
             }
 
             "varargs_expression" => {
-                if let Some(varargs_explist) = self.local_scope.varargs_mut() {
+                if let Some(varargs_explist) = self.scope.varargs_mut() {
                     varargs_explist.combine(explist.clone());
                 } else {
                     todo!("@Todo: scope error (not a varargs function)")
@@ -878,7 +844,7 @@ impl ChunkBuilder {
     where
         I: IntoIterator<Item = String>,
     {
-        self.local_scope.extend(names);
+        self.scope.extend(names);
     }
 
     /// Assigns the given variables to have the types according to the given expressions.
@@ -890,20 +856,18 @@ impl ChunkBuilder {
     /// As in, `foo, bar, baz = 1, 3`.
     fn assign<I, T>(&mut self, names: I, cons_sets: T)
     where
+        // @Cleanup: this probs doesn't need to be String
         I: IntoIterator<Item = String>,
         T: IntoIterator<Item = ConstraintSet>,
     {
         for (name, new_constraints) in names.into_iter().zip(cons_sets.into_iter()) {
-            if let Some(constraints) = self.local_scope.get_mut(&name) {
-                // If it's been declared as a local,
-                // then overwrite the type of that local.
-                *constraints = new_constraints;
-            } else {
-                // If it's not a local,
-                // mark that this chunk assigns a global variable of this name and type.
-                self.provided_globals
-                    .declare_and_assign(name, new_constraints);
+            if !self.scope.contains_key(&name) {
+                self.scope.declare_global(name.clone());
             }
+            let constraints = self.scope.get_mut(&name).expect(
+                "variable should be added to scope as a new global if not already in scope",
+            );
+            *constraints = new_constraints;
         }
     }
 }
