@@ -1,6 +1,7 @@
 use std::fmt::{self, Display};
 use std::fs;
 use std::path::Path;
+use std::sync::atomic::{self, AtomicUsize};
 
 use im::{HashMap, HashSet};
 use itertools::Itertools;
@@ -9,12 +10,23 @@ use tree_sitter::Node;
 use crate::error::IncludeError;
 use crate::scope::Scope;
 
+/// A handle to the type of a particular expression/variable.
+#[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
+pub(crate) struct TypeVar(usize);
+
 /// A struct representing a typechecking context.
 /// That is, all the files containing code to be typechecked,
 /// and all needed state and bookkeeping to return useful type information.
 pub struct Typechecker {
     parser: tree_sitter::Parser,
     pub files: HashMap<FileID, (tree_sitter::Tree, TypedChunk)>,
+
+    /// The mapping from type variables to type constraints.
+    /// Implemented as a `Vec`,
+    /// because the type variables in existence
+    /// are guaranteed to have IDs in the range `0..N`
+    /// where `N` is the ID of the freshest type var.
+    typevars: Vec<ConstraintSet>,
 }
 
 impl Typechecker {
@@ -28,6 +40,7 @@ impl Typechecker {
         Typechecker {
             parser,
             files: HashMap::new(),
+            typevars: Vec::new(),
         }
     }
 
@@ -79,6 +92,32 @@ impl Typechecker {
         self.files.insert(id, (tree, chunk));
 
         Ok(())
+    }
+
+    /// Makes a fresh type variable,
+    /// adds it to the mapping,
+    /// and returns the [`TypeVar`].
+    fn fresh(&mut self) -> TypeVar {
+        static UNIQUE_COUNTER: AtomicUsize = AtomicUsize::new(0);
+        let id = UNIQUE_COUNTER.fetch_add(1, atomic::Ordering::Relaxed);
+        let var = TypeVar(id);
+        self.typevars.push(ConstraintSet::default());
+        debug_assert_eq!(self.typevars.len() - 1, id);
+        var
+    }
+
+    /// Gets the type constraints corresponding to the given [`TypeVar`].
+    fn get(&self, var: TypeVar) -> &ConstraintSet {
+        self.typevars
+            .get(var.0)
+            .expect("all TypeVars in existence should have been added to the mapping")
+    }
+
+    /// Gets a mutable reference to the type constraints corresponding to the given [`TypeVar`].
+    fn get_mut(&mut self, var: TypeVar) -> &mut ConstraintSet {
+        self.typevars
+            .get_mut(var.0)
+            .expect("all TypeVars in existence should have been added to the mapping")
     }
 }
 
