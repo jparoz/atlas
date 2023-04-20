@@ -4,7 +4,7 @@ use std::path::Path;
 
 use im::{HashMap, HashSet};
 use itertools::Itertools;
-use tree_sitter::{Node, Tree};
+use tree_sitter::Node;
 
 use crate::error::IncludeError;
 use crate::scope::Scope;
@@ -48,7 +48,32 @@ impl Typechecker {
             log::warn!("Syntax error");
         }
 
-        let chunk = TypedChunk::new(&tree, contents);
+        let chunk = {
+            let mut builder = ChunkBuilder {
+                typechecker: self,
+                src: contents,
+                scopes: HashMap::new(),
+                scope: Scope::new_top_level(),
+                type_constraints: HashMap::new(),
+            };
+
+            let return_type = builder.typecheck_block(tree.root_node());
+
+            let ChunkBuilder {
+                src,
+                scopes,
+                scope,
+                type_constraints,
+                ..
+            } = builder;
+            TypedChunk {
+                src,
+                scopes,
+                scope,
+                type_constraints,
+                return_type,
+            }
+        };
 
         // @Todo: check if we overwrote an entry here
         self.files.insert(id, (tree, chunk));
@@ -119,44 +144,16 @@ pub struct TypedChunk {
 
 /// Manages the typechecking of a single Lua chunk.
 /// See [`TypedChunk`] for documentation of fields.
-#[derive(Debug, Clone)]
-struct ChunkBuilder {
+#[derive(Debug)]
+struct ChunkBuilder<'a> {
+    typechecker: &'a mut Typechecker,
     src: String,
     scopes: HashMap<usize, Scope>,
     scope: Scope,
     type_constraints: HashMap<usize, ExpList>,
 }
 
-impl TypedChunk {
-    /// Builds the type environment at each statement in the given chunk.
-    /// Returns the new `TypedChunk`.
-    pub fn new(tree: &Tree, src: String) -> Self {
-        let mut builder = ChunkBuilder {
-            src,
-            scopes: HashMap::new(),
-            scope: Scope::new_top_level(),
-            type_constraints: HashMap::new(),
-        };
-
-        let return_type = builder.typecheck_block(tree.root_node());
-
-        let ChunkBuilder {
-            src,
-            scopes,
-            scope,
-            type_constraints,
-        } = builder;
-        TypedChunk {
-            src,
-            scopes,
-            scope,
-            type_constraints,
-            return_type,
-        }
-    }
-}
-
-impl ChunkBuilder {
+impl<'a> ChunkBuilder<'a> {
     /// Builds the type environment in a block.
     /// Returns a list of all the possible return types of the block.
     fn typecheck_block(&mut self, block: Node) -> ExpList {
