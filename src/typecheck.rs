@@ -119,6 +119,20 @@ impl Typechecker {
             .get_mut(var.0)
             .expect("all TypeVars in existence should have been added to the mapping")
     }
+
+    /// Combines the constraints of two `ExpList`s.
+    fn combine(&mut self, explist: &mut ExpList, other: ExpList) {
+        // Resize `explist` so that it's at least as long as `other`
+        if explist.0.len() < other.0.len() {
+            explist.0.resize(other.0.len(), ConstraintSet::default());
+        }
+
+        // For each item in the lists (item-wise),
+        // extend the set in `explist` with the new constraints from `other`.
+        for (constraints, new_constraints) in explist.0.iter_mut().zip(other.0.into_iter()) {
+            constraints.0.extend(new_constraints.0);
+        }
+    }
 }
 
 impl Default for Typechecker {
@@ -249,7 +263,7 @@ impl<'a> ChunkBuilder<'a> {
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     }
 
                     self.scope.close_scope();
@@ -268,7 +282,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     }
 
                     self.scope.close_scope();
@@ -280,7 +294,7 @@ impl<'a> ChunkBuilder<'a> {
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     }
 
                     // until
@@ -337,7 +351,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     }
 
                     self.scope.close_scope();
@@ -381,7 +395,7 @@ impl<'a> ChunkBuilder<'a> {
                                 returns: ExpList::default(),
                             }
                         )])]);
-                    explist.combine(iterator_type);
+                    self.typechecker.combine(&mut explist, iterator_type);
 
                     let left = statement.child_by_field_name("left").expect("non-optional");
                     let names = self.list(left);
@@ -391,7 +405,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     }
 
                     self.scope.close_scope();
@@ -415,7 +429,7 @@ impl<'a> ChunkBuilder<'a> {
                         self.scope.open_scope();
 
                         let return_list = self.typecheck_block(consequence);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
 
                         self.scope.close_scope();
                     }
@@ -433,7 +447,7 @@ impl<'a> ChunkBuilder<'a> {
                                 self.scope.open_scope();
 
                                 let return_list = self.typecheck_block(consequence);
-                                return_type.combine(return_list);
+                                self.typechecker.combine(&mut return_type, return_list);
 
                                 self.scope.close_scope();
                             }
@@ -442,7 +456,7 @@ impl<'a> ChunkBuilder<'a> {
                             self.scope.open_scope();
 
                             let return_list = self.typecheck_block(body);
-                            return_type.combine(return_list);
+                            self.typechecker.combine(&mut return_type, return_list);
 
                             self.scope.close_scope();
                         }
@@ -485,7 +499,7 @@ impl<'a> ChunkBuilder<'a> {
                 "return_statement" => {
                     if let Some(exp_list) = statement.child(1) {
                         let return_list = self.explist(exp_list);
-                        return_type.combine(return_list);
+                        self.typechecker.combine(&mut return_type, return_list);
                     } else {
                         // `return;` means `return nil;`
                         return_type
@@ -859,7 +873,7 @@ impl<'a> ChunkBuilder<'a> {
 
             "varargs_expression" => {
                 if let Some(varargs_explist) = self.scope.varargs_mut() {
-                    varargs_explist.combine(explist.clone());
+                    self.typechecker.combine(varargs_explist, explist.clone());
                 } else {
                     todo!("@Todo: scope error (not a varargs function)")
                 }
@@ -870,7 +884,7 @@ impl<'a> ChunkBuilder<'a> {
 
         // Add the constraints to the expression's sets.
         let existing_explist = self.type_constraints.entry(expr.id()).or_default();
-        existing_explist.combine(explist);
+        self.typechecker.combine(existing_explist, explist);
     }
 
     /// Adds the given variables to the local scope.
@@ -971,20 +985,6 @@ pub struct ExpList(Vec<ConstraintSet>);
 impl ExpList {
     fn new() -> Self {
         ExpList::default()
-    }
-
-    /// Combines the constraints of two `ExpList`s.
-    fn combine(&mut self, other: ExpList) {
-        // Resize `self` so that it's at least as long as `other`
-        if self.0.len() < other.0.len() {
-            self.0.resize(other.0.len(), ConstraintSet::default());
-        }
-
-        // For each item in the lists (item-wise),
-        // extend the set in `self` with the new constraints from `other`.
-        for (constraints, new_constraints) in self.0.iter_mut().zip(other.0.into_iter()) {
-            constraints.0.extend(new_constraints.0);
-        }
     }
 }
 
