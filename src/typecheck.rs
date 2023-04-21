@@ -12,7 +12,7 @@ use crate::scope::Scope;
 
 /// A handle to the type of a particular expression/variable.
 #[derive(Debug, Clone, Copy, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub(crate) struct TypeVar(usize);
+pub struct TypeVar(usize);
 
 /// A struct representing a typechecking context.
 /// That is, all the files containing code to be typechecked,
@@ -67,7 +67,7 @@ impl Typechecker {
                 src: contents,
                 scopes: HashMap::new(),
                 scope: Scope::new_top_level(),
-                type_constraints: HashMap::new(),
+                node_types: HashMap::new(),
             };
 
             let return_type = builder.typecheck_block(tree.root_node());
@@ -76,7 +76,7 @@ impl Typechecker {
                 src,
                 scopes,
                 scope,
-                type_constraints,
+                node_types: type_constraints,
                 ..
             } = builder;
             TypedChunk {
@@ -106,6 +106,19 @@ impl Typechecker {
         var
     }
 
+    /// Constrains a type variable to include the given constraints.
+    fn constrain(&mut self, typevar: TypeVar, constraints: ConstraintSet) {
+        self.get_mut(typevar).0.extend(constraints.0);
+    }
+
+    /// Returns a fresh type variable,
+    /// constrained by the given constraints.
+    fn fresh_constrain(&mut self, constraints: ConstraintSet) -> TypeVar {
+        let typevar = self.fresh();
+        self.constrain(typevar, constraints);
+        typevar
+    }
+
     /// Gets the type constraints corresponding to the given [`TypeVar`].
     fn get(&self, var: TypeVar) -> &ConstraintSet {
         self.typevars
@@ -121,16 +134,15 @@ impl Typechecker {
     }
 
     /// Combines the constraints of two `ExpList`s.
-    fn combine(&mut self, explist: &mut ExpList, other: ExpList) {
-        // Resize `explist` so that it's at least as long as `other`
-        if explist.0.len() < other.0.len() {
-            explist.0.resize(other.0.len(), ConstraintSet::default());
-        }
-
+    fn combine(&mut self, explist: &ExpList, other: &ExpList) {
         // For each item in the lists (item-wise),
         // extend the set in `explist` with the new constraints from `other`.
-        for (constraints, new_constraints) in explist.0.iter_mut().zip(other.0.into_iter()) {
-            constraints.0.extend(new_constraints.0);
+        for (existing_typevar, new_typevar) in
+            explist.0.iter().copied().zip(other.0.iter().copied())
+        {
+            let new_constraints = self.get(new_typevar).clone();
+            let existing_constraints = self.get_mut(existing_typevar);
+            existing_constraints.0.extend(new_constraints.0);
         }
     }
 }
@@ -147,6 +159,10 @@ impl fmt::Debug for Typechecker {
             .field(
                 "files",
                 &self.files.keys().map(|id| &id.0).collect::<Vec<_>>(),
+            )
+            .field(
+                "typevars",
+                &self.typevars.iter().enumerate().collect::<Vec<_>>(),
             )
             .finish_non_exhaustive()
     }
@@ -203,14 +219,14 @@ struct ChunkBuilder<'a> {
     src: String,
     scopes: HashMap<usize, Scope>,
     scope: Scope,
-    type_constraints: HashMap<usize, ExpList>,
+    node_types: HashMap<usize, ExpList>,
 }
 
 impl<'a> ChunkBuilder<'a> {
     /// Builds the type environment in a block.
     /// Returns a list of all the possible return types of the block.
     fn typecheck_block(&mut self, block: Node) -> ExpList {
-        let mut return_type = ExpList::new();
+        let return_type = ExpList::default();
 
         // For each statement,
         // build the type environment at that point.
@@ -238,23 +254,26 @@ impl<'a> ChunkBuilder<'a> {
                 "variable_assignment" => {
                     // @Todo: Handle table variables (table.field and table[index]),
                     // either here or in self.assign
-                    let var_list = statement.named_child(0).expect("non-optional");
-                    let names = self.list(var_list);
+                    let names_node = statement.named_child(0).expect("non-optional");
+                    let names = self.list(names_node);
 
-                    let expr_list = statement.named_child(1).expect("non-optional");
-                    let types = self.explist(expr_list);
+                    let explist_node = statement.named_child(1).expect("non-optional");
+                    let explist = self.explist(explist_node);
 
-                    self.assign(names, types.0);
+                    self.assign(names, explist.0);
                 }
 
                 "local_variable_declaration" => {
-                    let var_list = statement.named_child(0).expect("non-optional");
-                    let names = self.list(var_list);
-                    self.declare_local(names.clone());
+                    let names_node = statement.named_child(0).expect("non-optional");
+                    let names = self.list(names_node);
+                    for name in names.iter() {
+                        self.scope
+                            .declare_local(name.clone(), self.typechecker.fresh());
+                    }
 
-                    if let Some(expr_list) = statement.named_child(1) {
-                        let types = self.explist(expr_list);
-                        self.assign(names, types.0);
+                    if let Some(explist_node) = statement.named_child(1) {
+                        let explist = self.explist(explist_node);
+                        self.assign(names, explist.0);
                     }
                 }
 
@@ -263,7 +282,7 @@ impl<'a> ChunkBuilder<'a> {
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -282,7 +301,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -294,7 +313,7 @@ impl<'a> ChunkBuilder<'a> {
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
                     }
 
                     // until
@@ -309,57 +328,51 @@ impl<'a> ChunkBuilder<'a> {
 
                 // for name = start, end [, step] do [body] end
                 "for_numeric_statement" => {
+                    // This is effectively a constant.
+                    // @Todo @Cleanup: reuse the same typevars for types of literals
+                    let num_typevar = self.typechecker.fresh();
+                    self.typechecker.constrain(num_typevar, Type::Number.into());
+                    let num_explist = ExpList(vec![num_typevar]);
+
                     self.scope.open_scope();
-
-                    let name = statement.child_by_field_name("name").expect("non-optional");
-                    let name_str = self.src[name.byte_range()].to_string();
-
-                    // See section 3.3.5 of Lua 5.4 manual.
-                    let start = statement
-                        .child_by_field_name("start")
-                        .expect("non-optional");
-                    let start_type = self.typecheck_expression(start);
-                    self.constrain(
-                        start,
-                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                            Type::Number
-                        )])]),
-                    );
 
                     // @Note: Numerical for loops convert their arguments to numbers,
                     // so the bound variable is guaranteed to have the type `number`
                     // (either integer or float; see section 3.3.5 of Lua 5.4 manual).
-                    self.scope.declare_and_assign(name_str, Type::Number.into());
 
-                    let end = statement.child_by_field_name("end").expect("non-optional");
-                    self.constrain(
-                        end,
-                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                            Type::Number
-                        )])]),
-                    );
+                    // name
+                    let name_node = statement.child_by_field_name("name").expect("non-optional");
+                    let name = self.src[name_node.byte_range()].to_string();
+                    self.scope.declare_local(name, num_typevar);
 
-                    if let Some(step) = statement.child_by_field_name("step") {
-                        self.constrain(
-                            step,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
+                    // start
+                    let start_node = statement
+                        .child_by_field_name("start")
+                        .expect("non-optional");
+                    let start_explist = self.typecheck_expression(start_node);
+                    self.typechecker.combine(&start_explist, &num_explist);
+
+                    // end
+                    let end_node = statement.child_by_field_name("end").expect("non-optional");
+                    let end_explist = self.typecheck_expression(end_node);
+                    self.typechecker.combine(&end_explist, &num_explist);
+
+                    // [step]
+                    if let Some(step_node) = statement.child_by_field_name("step") {
+                        let step_explist = self.typecheck_expression(step_node);
+                        self.typechecker.combine(&step_explist, &num_explist);
                     }
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
                     }
 
                     self.scope.close_scope();
                 }
 
-                // for left in right do [body] end
-                //   left: variable_list
-                //   right: expression_list
+                // for names in explist do [body] end
                 "for_generic_statement" => {
                     self.scope.open_scope();
 
@@ -377,35 +390,35 @@ impl<'a> ChunkBuilder<'a> {
                     // The results from this call are then assigned to the loop variables,
                     // following the rules of multiple assignments.
 
-                    let right = statement
+                    let explist_node = statement
                         .child_by_field_name("right")
                         .expect("non-optional");
-                    let mut explist = self.explist(right);
-                    explist.0.resize(4, ConstraintSet::default());
-                    let state = explist.0.get(1).unwrap();
-                    let initial_control = explist.0.get(2).unwrap();
+                    let mut explist = self.explist(explist_node);
+                    explist.0.resize(4, self.typechecker.fresh());
+                    let iterator_typevar = explist.0.get(0).unwrap();
+                    let state_typevar = explist.0.get(1).unwrap();
+                    let control_typevar = explist.0.get(2).unwrap();
 
                     // This is the explist of the minimal type for
                     // the iterator function of a generic for loop.
                     let iterator_type =
-                        ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                            Type::Function {
-                                arguments: ExpList(vec![state.clone(), initial_control.clone()]),
-                                // Default makes no assumptions about the return type
-                                returns: ExpList::default(),
-                            }
-                        )])]);
-                    self.typechecker.combine(&mut explist, iterator_type);
+                        ConstraintSet(im::hashset![Constraint::IsType(Type::Function {
+                            arguments: ExpList(vec![*state_typevar, *control_typevar]),
+                            // Default makes no assumptions about the return type
+                            returns: ExpList::default(),
+                        })]);
+                    self.typechecker.constrain(*iterator_typevar, iterator_type);
 
-                    let left = statement.child_by_field_name("left").expect("non-optional");
-                    let names = self.list(left);
-                    self.declare_local(names.clone());
-                    self.assign(names, explist.0);
+                    let names_node = statement.child_by_field_name("left").expect("non-optional");
+                    let names = self.list(names_node);
+                    for (name, typevar) in names.iter().zip(explist.0) {
+                        self.scope.declare_local(name.clone(), typevar);
+                    }
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -429,7 +442,7 @@ impl<'a> ChunkBuilder<'a> {
                         self.scope.open_scope();
 
                         let return_list = self.typecheck_block(consequence);
-                        self.typechecker.combine(&mut return_type, return_list);
+                        self.typechecker.combine(&return_type, &return_list);
 
                         self.scope.close_scope();
                     }
@@ -447,7 +460,7 @@ impl<'a> ChunkBuilder<'a> {
                                 self.scope.open_scope();
 
                                 let return_list = self.typecheck_block(consequence);
-                                self.typechecker.combine(&mut return_type, return_list);
+                                self.typechecker.combine(&return_type, &return_list);
 
                                 self.scope.close_scope();
                             }
@@ -456,7 +469,7 @@ impl<'a> ChunkBuilder<'a> {
                             self.scope.open_scope();
 
                             let return_list = self.typecheck_block(body);
-                            self.typechecker.combine(&mut return_type, return_list);
+                            self.typechecker.combine(&return_type, &return_list);
 
                             self.scope.close_scope();
                         }
@@ -464,26 +477,31 @@ impl<'a> ChunkBuilder<'a> {
                 }
 
                 "function_definition_statement" => {
-                    let name = statement.child_by_field_name("name").expect("non-optional");
-                    let name_string = self.src[name.byte_range()].to_string();
+                    let name_node = statement.child_by_field_name("name").expect("non-optional");
+                    let name = self.src[name_node.byte_range()].to_string();
 
-                    log::trace!("Typechecking function `{name_string}`");
+                    log::trace!("Typechecking function `{name}`");
                     let function_type = self.typecheck_function(statement);
+                    let function_typevar = self.typechecker.fresh();
+                    self.typechecker
+                        .constrain(function_typevar, function_type.into());
 
                     // @Todo @Fixme: change this to accept table type names,
                     // e.g. `function foo.bar:baz() body end`
-                    self.assign([name_string], [function_type.into()]);
+                    self.scope.insert(name, function_typevar);
                 }
 
                 "local_function_definition_statement" => {
-                    let name = statement.child_by_field_name("name").expect("non-optional");
-                    let name_string = self.src[name.byte_range()].to_string();
+                    let name_node = statement.child_by_field_name("name").expect("non-optional");
+                    let name = self.src[name_node.byte_range()].to_string();
 
-                    log::trace!("Typechecking function `{name_string}`");
+                    log::trace!("Typechecking function `{name}`");
                     let function_type = self.typecheck_function(statement);
+                    let function_typevar = self.typechecker.fresh();
+                    self.typechecker
+                        .constrain(function_typevar, function_type.into());
 
-                    self.declare_local([name_string.clone()]);
-                    self.assign([name_string], [function_type.into()]);
+                    self.scope.declare_local(name, function_typevar);
                 }
 
                 // @Todo @Checkme: should we do an early return here?
@@ -497,16 +515,18 @@ impl<'a> ChunkBuilder<'a> {
                 // currently we do an early return of this function,
                 // but possibly we could still check some stuff after the return statement.
                 "return_statement" => {
-                    if let Some(exp_list) = statement.child(1) {
-                        let return_list = self.explist(exp_list);
-                        self.typechecker.combine(&mut return_type, return_list);
+                    let return_list = if let Some(explist_node) = statement.child(1) {
+                        self.explist(explist_node)
                     } else {
                         // `return;` means `return nil;`
-                        return_type
-                            .0
-                            .get_mut(0)
-                            .map(|cons| cons.0.insert(Type::Nil.into()));
-                    }
+                        // This is effectively a constant.
+                        // @Todo @Cleanup: reuse the same typevars for types of literals
+                        let nil_typevar = self.typechecker.fresh();
+                        self.typechecker.constrain(nil_typevar, Type::Nil.into());
+                        ExpList(vec![nil_typevar])
+                    };
+                    self.typechecker.combine(&return_type, &return_list);
+
                     break;
                 }
 
@@ -518,7 +538,7 @@ impl<'a> ChunkBuilder<'a> {
             }
         }
 
-        log::trace!("Block return type: {return_type}");
+        log::trace!("Block return type: {return_type:?}");
 
         return_type
     }
@@ -535,36 +555,39 @@ impl<'a> ChunkBuilder<'a> {
 
         let explist = match expr.kind() {
             // Primitive types
-            "nil" => vec![Type::Nil.into()].into(),
-            "true" | "false" => vec![Type::Boolean.into()].into(),
-            "number" => vec![Type::Number.into()].into(),
-            "string" => vec![Type::String.into()].into(),
+            "nil" => explist![self.typechecker.fresh_constrain(Type::Nil.into())],
+            "true" | "false" => explist![self.typechecker.fresh_constrain(Type::Boolean.into())],
+            "number" => explist![self.typechecker.fresh_constrain(Type::Number.into())],
+            "string" => explist![self.typechecker.fresh_constrain(Type::String.into())],
 
             // Variable references
             "variable" => {
                 let var_str = &self.src[expr.byte_range()];
-                if let Some(constraint_set) = self.scope.get(var_str) {
-                    vec![constraint_set.clone()].into()
+                let typevar = if let Some(typevar) = self.scope.get(var_str) {
+                    typevar
                 } else {
-                    self.scope.assume_global(var_str.to_string());
-                    vec![ConstraintSet::default()].into()
-                }
+                    let typevar = self.typechecker.fresh();
+                    self.scope.assume_global(var_str.to_string(), typevar);
+                    typevar
+                };
+                explist![typevar]
             }
 
             // Tables
-            "table" => vec![Type::Table.into()].into(),
+            "table" => explist![self.typechecker.fresh_constrain(Type::Table.into())],
 
             // Functions
             "function_definition" => {
                 log::trace!("Typechecking anonymous function defined at {expr:?}");
-                vec![self.typecheck_function(expr).into()].into()
+                let function_type = self.typecheck_function(expr);
+                explist![self.typechecker.fresh_constrain(function_type.into())]
             }
 
             // @Todo @XXX:
             // Lookup the type of the function/object being called,
             // check the argument types (?),
             // and return the return type.
-            "call" => vec![Type::Unknown.into()].into(),
+            "call" => explist![self.typechecker.fresh_constrain(Type::Unknown.into())],
 
             "parenthesized_expression" => {
                 let sub_expr = expr.named_child(0).expect("non-optional");
@@ -585,43 +608,36 @@ impl<'a> ChunkBuilder<'a> {
             "unary_expression" => {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 let operand = expr.child_by_field_name("argument").expect("non-optional");
+
                 match &self.src[operator.byte_range()] {
                     // number
                     "-" => {
-                        self.constrain(
-                            operand,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let explist = explist![typevar];
+                        self.constrain_node(operand, &explist);
+                        explist
                     }
 
                     "#" => {
-                        self.constrain(
-                            operand,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::Or(vec![
-                                Constraint::IsType(Type::Table),
-                                Constraint::IsType(Type::String),
-                            ])])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let typevar =
+                            self.typechecker.fresh_constrain(ConstraintSet(im::hashset![
+                                Constraint::Or(vec![Type::Table.into(), Type::String.into()])
+                            ]));
+                        self.constrain_node(operand, &explist![typevar]);
+                        explist![self.typechecker.fresh_constrain(Type::Number.into())]
                     }
 
                     // integer
                     // @Todo: not Type::Number
                     "~" => {
-                        self.constrain(
-                            operand,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let explist = explist![typevar];
+                        self.constrain_node(operand, &explist);
+                        explist
                     }
 
                     // bool
-                    "not" => vec![Type::Boolean.into()].into(),
+                    "not" => explist![self.typechecker.fresh_constrain(Type::Boolean.into())],
 
                     _ => unreachable!(),
                 }
@@ -632,40 +648,25 @@ impl<'a> ChunkBuilder<'a> {
                 let operator = expr.child_by_field_name("operator").expect("non-optional");
                 let left = expr.child_by_field_name("left").expect("non-optional");
                 let right = expr.child_by_field_name("right").expect("non-optional");
+
                 match &self.src[operator.byte_range()] {
                     // number
                     "+" | "-" | "*" | "//" | "%" => {
-                        self.constrain(
-                            left,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        self.constrain(
-                            right,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let num_typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let num_explist = explist![num_typevar];
+                        self.constrain_node(left, &num_explist);
+                        self.constrain_node(right, &num_explist);
+                        num_explist
                     }
 
                     // float
                     // @Todo: not Type::Number
                     "/" | "^" => {
-                        self.constrain(
-                            left,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        self.constrain(
-                            right,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let num_typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let num_explist = explist![num_typevar];
+                        self.constrain_node(left, &num_explist);
+                        self.constrain_node(right, &num_explist);
+                        num_explist
                     }
 
                     // bool
@@ -676,45 +677,29 @@ impl<'a> ChunkBuilder<'a> {
                         // and constrain only in one direction.
                         let left_explist = self.typecheck_expression(left);
                         let right_explist = self.typecheck_expression(right);
-                        self.constrain(left, right_explist);
-                        self.constrain(right, left_explist);
+                        self.constrain_node(left, &right_explist);
+                        self.constrain_node(right, &left_explist);
 
-                        vec![Type::Boolean.into()].into()
+                        explist![self.typechecker.fresh_constrain(Type::Boolean.into())]
                     }
 
                     // integer
                     // @Todo: not Type::Number
                     "|" | "~" | "&" | "<<" | ">>" => {
-                        self.constrain(
-                            left,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        self.constrain(
-                            right,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::Number
-                            )])]),
-                        );
-                        vec![Type::Number.into()].into()
+                        let num_typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let num_explist = explist![num_typevar];
+                        self.constrain_node(left, &num_explist);
+                        self.constrain_node(right, &num_explist);
+                        num_explist
                     }
 
                     // string
                     ".." => {
-                        self.constrain(
-                            left,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::String
-                            )])]),
-                        );
-                        self.constrain(
-                            right,
-                            ExpList(vec![ConstraintSet(im::hashset![Constraint::IsType(
-                                Type::String
-                            )])]),
-                        );
-                        vec![Type::String.into()].into()
+                        let string_typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let string_explist = explist![string_typevar];
+                        self.constrain_node(left, &string_explist);
+                        self.constrain_node(right, &string_explist);
+                        string_explist
                     }
 
                     // short-circuiting
@@ -741,10 +726,27 @@ impl<'a> ChunkBuilder<'a> {
                     // This is essentially arbitrary,
                     // but it's at least sometimes right.
                     "or" | "and" => {
+                        let left = expr.child_by_field_name("left").expect("non-optional");
                         let right = expr.child_by_field_name("right").expect("non-optional");
-                        let mut types = self.typecheck_expression(right);
-                        types.0.truncate(1);
-                        types
+
+                        let left_explist = self.typecheck_expression(left);
+                        let right_explist = self.typecheck_expression(right);
+
+                        let left_constraints = self.typechecker.get(left_explist.0[0]);
+                        let right_constraints = self.typechecker.get(right_explist.0[0]);
+
+                        let res_typevar =
+                            self.typechecker
+                                .fresh_constrain(ConstraintSet(im::hashset! {
+                                    Constraint::Or(
+                                        left_constraints.0
+                                            .clone()
+                                            .into_iter()
+                                            .chain(right_constraints.0.clone())
+                                            .collect()
+                                        )
+                                }));
+                        explist![res_typevar]
                     }
 
                     _ => unreachable!(),
@@ -755,7 +757,7 @@ impl<'a> ChunkBuilder<'a> {
         };
 
         // @Todo: check for clashes
-        self.type_constraints.insert(expr.id(), explist.clone());
+        self.node_types.insert(expr.id(), explist.clone());
 
         explist
     }
@@ -772,13 +774,9 @@ impl<'a> ChunkBuilder<'a> {
                 match param.kind() {
                     "identifier" => {
                         let name = self.src[param.byte_range()].to_string();
-                        let constraints = ConstraintSet::new();
-
                         argument_names.push(name.clone());
-
-                        log::trace!("Binding function argument `{name}` to type: {constraints:?}");
-                        self.declare_local([name.clone()]);
-                        self.assign([name], [constraints]);
+                        let typevar = self.typechecker.fresh();
+                        self.scope.declare_local(name.clone(), typevar);
                     }
 
                     "vararg_expression" => todo!(),
@@ -791,16 +789,16 @@ impl<'a> ChunkBuilder<'a> {
         let returns = if let Some(body) = function_body.child_by_field_name("body") {
             self.typecheck_block(body)
         } else {
-            ExpList::new()
+            ExpList::default()
         };
 
-        let mut arguments = ExpList::new();
+        let mut arguments = ExpList::default();
         for name in argument_names {
-            let constraints = self
+            let typevar = self
                 .scope
                 .remove(&name)
                 .expect("declare_local should have inserted this key");
-            arguments.0.push(constraints);
+            arguments.0.push(typevar);
         }
 
         self.scope.close_scope();
@@ -830,7 +828,7 @@ impl<'a> ChunkBuilder<'a> {
     /// (where `foo` has return type `number, string`),
     /// will be evaluated to have the type `number, number, bool, number, string`.
     fn explist(&mut self, list: Node) -> ExpList {
-        let mut types = ExpList::new();
+        let mut types = ExpList::default();
 
         let count = list.named_child_count();
         let mut cursor = list.walk();
@@ -853,7 +851,7 @@ impl<'a> ChunkBuilder<'a> {
     /// Constrains the given node to include the constraints in the given [`ExpList`].
     /// Also, if the node represents a variable,
     /// adds the first constraint to the variable scope as well.
-    fn constrain(&mut self, expr: Node, explist: ExpList) {
+    fn constrain_node(&mut self, expr: Node, explist: &ExpList) {
         if explist.0.is_empty() {
             // nothing to add
             return;
@@ -863,17 +861,20 @@ impl<'a> ChunkBuilder<'a> {
         // if it is indeed a variable.
         match expr.kind() {
             "variable" => {
+                let typevar = self.typechecker.fresh();
+
                 let var = &self.src[expr.byte_range()];
                 if !self.scope.contains_key(var) {
-                    self.scope.assume_global(var.to_string());
+                    self.scope.assume_global(var.to_string(), typevar);
                 }
-                let constraint_set = self.scope.get_mut(var).unwrap();
-                constraint_set.0.extend(explist.0[0].0.clone().into_iter());
+
+                let constraints = self.typechecker.get(explist.0[0]);
+                self.typechecker.constrain(typevar, constraints.clone());
             }
 
             "varargs_expression" => {
                 if let Some(varargs_explist) = self.scope.varargs_mut() {
-                    self.typechecker.combine(varargs_explist, explist.clone());
+                    self.typechecker.combine(varargs_explist, explist);
                 } else {
                     todo!("@Todo: scope error (not a varargs function)")
                 }
@@ -883,18 +884,8 @@ impl<'a> ChunkBuilder<'a> {
         }
 
         // Add the constraints to the expression's sets.
-        let existing_explist = self.type_constraints.entry(expr.id()).or_default();
+        let existing_explist = self.node_types.entry(expr.id()).or_default();
         self.typechecker.combine(existing_explist, explist);
-    }
-
-    /// Adds the given variables to the local scope.
-    ///
-    /// As in, `local foo`.
-    fn declare_local<I>(&mut self, names: I)
-    where
-        I: IntoIterator<Item = String>,
-    {
-        self.scope.extend(names);
     }
 
     /// Assigns the given variables to have the types according to the given expressions.
@@ -904,20 +895,14 @@ impl<'a> ChunkBuilder<'a> {
     /// the extra expressions are ignored.
     ///
     /// As in, `foo, bar, baz = 1, 3`.
-    fn assign<I, T>(&mut self, names: I, cons_sets: T)
+    fn assign<I, T>(&mut self, names: I, typevars: T)
     where
         // @Cleanup: this probs doesn't need to be String
         I: IntoIterator<Item = String>,
-        T: IntoIterator<Item = ConstraintSet>,
+        T: IntoIterator<Item = TypeVar>,
     {
-        for (name, new_constraints) in names.into_iter().zip(cons_sets.into_iter()) {
-            if !self.scope.contains_key(&name) {
-                self.scope.declare_global(name.clone());
-            }
-            let constraints = self.scope.get_mut(&name).expect(
-                "variable should be added to scope as a new global if not already in scope",
-            );
-            *constraints = new_constraints;
+        for (name, typevar) in names.into_iter().zip(typevars) {
+            self.scope.insert(name, typevar);
         }
     }
 }
@@ -964,7 +949,7 @@ impl Display for Type {
 
             // Parametric types
             Function { arguments, returns } => {
-                write!(f, "(({arguments}) -> {returns})")
+                write!(f, "(({arguments:?}) -> {returns:?})")
             }
 
             Thread => write!(f, "thread"),
@@ -980,31 +965,15 @@ impl Display for Type {
 /// An `ExpList` represents a Lua explist,
 /// e.g. a multiple return or varargs expression.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
-pub struct ExpList(Vec<ConstraintSet>);
+pub struct ExpList(Vec<TypeVar>);
 
-impl ExpList {
-    fn new() -> Self {
-        ExpList::default()
-    }
+#[macro_export]
+macro_rules! explist {
+    ($($x:expr),*) => {
+        ExpList(vec![$($x,)*])
+    };
 }
-
-impl From<Vec<ConstraintSet>> for ExpList {
-    fn from(exps: Vec<ConstraintSet>) -> Self {
-        ExpList(exps)
-    }
-}
-
-impl Display for ExpList {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_empty() {
-            // @Cleanup: Is this the best spot for this logic?
-            // Feels a bit wrong to have this be in the Display impl.
-            write!(f, "nil")
-        } else {
-            write!(f, "{}", self.0.iter().join(", "))
-        }
-    }
-}
+use explist;
 
 /// A `Constraint` represents the set of operations that the type of a variable must admit,
 /// based on uses of the variable.
@@ -1018,14 +987,6 @@ pub enum Constraint {
     IsType(Type),
     Or(Vec<Constraint>),
     And(Vec<Constraint>),
-}
-
-impl ConstraintSet {
-    /// Tries to find a type which satisfies all constraints in the set.
-    // @Todo: not Option<Type>, maybe Vec<Type>? or Result<Type>
-    fn unify(self) -> Option<Type> {
-        todo!()
-    }
 }
 
 impl Display for Constraint {
@@ -1047,12 +1008,6 @@ impl From<Type> for Constraint {
 
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
 pub struct ConstraintSet(HashSet<Constraint>);
-
-impl ConstraintSet {
-    fn new() -> Self {
-        ConstraintSet(HashSet::new())
-    }
-}
 
 impl From<Type> for ConstraintSet {
     fn from(typ: Type) -> Self {

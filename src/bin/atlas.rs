@@ -23,7 +23,8 @@ fn main() {
     let (_tree, chunk) = &typechecker.files[&id];
 
     log::info!("Chunk scope at end of file: {}", chunk.scope);
-    log::info!("Chunk return type: {}", chunk.return_type);
+    log::info!("Chunk return type: {:?}", chunk.return_type);
+    log::info!("Typechecker state: {:?}", typechecker);
 }
 
 /// Typechecker for vanilla Lua without annotations

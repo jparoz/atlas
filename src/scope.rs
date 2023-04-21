@@ -7,7 +7,7 @@ use im::HashMap;
 use itertools::Itertools;
 use nonempty::{nonempty, NonEmpty};
 
-use crate::typecheck::{ConstraintSet, ExpList};
+use crate::typecheck::{ExpList, TypeVar};
 
 /// Represents the type environment at a particular point in a chunk.
 #[derive(Debug, Default, Clone)]
@@ -22,13 +22,13 @@ pub struct Scope {
     subscopes: NonEmpty<SubScope>,
 
     /// The globals assigned by the current chunk.
-    globals_assigned: HashMap<String, ConstraintSet>,
+    globals_assigned: HashMap<String, TypeVar>,
 
     /// The globals assumed to exist by the current chunk.
     /// That is,
     /// any variables free in the chunk,
     /// any global variable accesses.
-    globals_assumed: HashMap<String, ConstraintSet>,
+    globals_assumed: HashMap<String, TypeVar>,
 }
 
 /// Represents one layer of the current lexical scope,
@@ -36,7 +36,7 @@ pub struct Scope {
 /// Includes an optional [`ExpList`] determining if the subscope represents a variadic function.
 #[derive(Debug, Default, Clone)]
 pub struct SubScope {
-    variable_constraints: HashMap<String, ConstraintSet>,
+    variables: HashMap<String, TypeVar>,
     varargs: Option<ExpList>,
 }
 
@@ -68,36 +68,21 @@ impl Scope {
 
     /// Adds a new variable to the scope,
     /// as in `local foo`.
-    pub fn declare(&mut self, name: String) {
-        self.subscopes
-            .last_mut()
-            .variable_constraints
-            .insert(name, ConstraintSet::default());
+    pub fn declare_local(&mut self, name: String, typevar: TypeVar) {
+        self.subscopes.last_mut().variables.insert(name, typevar);
     }
 
     /// Adds a new global variable to the scope,
     /// as in `foo = nil`.
-    pub fn declare_global(&mut self, name: String) {
+    pub fn declare_global(&mut self, name: String, typevar: TypeVar) {
         // @Todo: maybe handle this differently?
-        assert!(self
-            .globals_assigned
-            .insert(name, ConstraintSet::default())
-            .is_none());
+        assert!(self.globals_assigned.insert(name, typevar).is_none());
     }
 
     /// Assumes that a global variable should exist.
-    pub fn assume_global(&mut self, name: String) {
+    pub fn assume_global(&mut self, name: String, typevar: TypeVar) {
         // @Todo: maybe handle this differently?
-        assert!(self
-            .globals_assumed
-            .insert(name, ConstraintSet::default())
-            .is_none());
-    }
-
-    /// Adds a new variable to the scope with the type given by the constraint set,
-    /// as in `local foo = 123`.
-    pub fn declare_and_assign(&mut self, k: String, v: ConstraintSet) -> Option<ConstraintSet> {
-        self.subscopes.last_mut().variable_constraints.insert(k, v)
+        assert!(self.globals_assumed.insert(name, typevar).is_none());
     }
 
     /// Returns true if the given variable name is known to be in scope,
@@ -105,7 +90,7 @@ impl Scope {
     pub fn contains_key(&self, name: &str) -> bool {
         self.subscopes
             .iter()
-            .any(|s| s.variable_constraints.contains_key(name))
+            .any(|s| s.variables.contains_key(name))
             || self.globals_assigned.contains_key(name)
             || self.globals_assumed.contains_key(name)
     }
@@ -113,40 +98,50 @@ impl Scope {
     /// If the given name is in the local scope,
     /// or if it's a previously-used global,
     /// returns a reference to its current constraints.
-    pub fn get(&self, name: &str) -> Option<&ConstraintSet> {
+    pub fn get(&self, name: &str) -> Option<TypeVar> {
         self.subscopes
             .iter()
             .rev()
-            .find_map(|s| s.variable_constraints.get(name))
+            .find_map(|s| s.variables.get(name))
             .or_else(|| self.globals_assigned.get(name))
             .or_else(|| self.globals_assumed.get(name))
+            .copied()
     }
 
-    /// If the given name is in the local scope,
-    /// or if it's a previously-used global,
-    /// returns a mutable reference to its current constraints.
-    pub fn get_mut(&mut self, name: &str) -> Option<&mut ConstraintSet> {
-        self.subscopes
+    /// Inserts a name & typevar pair into the scope,
+    /// overwriting the existing typevar for the name (if there is one),
+    /// or adding a new global (if there isn't).
+    pub fn insert(&mut self, name: String, typevar: TypeVar) -> Option<TypeVar> {
+        if let Some(existing) = self
+            .subscopes
             .tail
             .iter_mut()
             .rev()
             .chain(iter::once(&mut self.subscopes.head))
-            .find_map(|s| s.variable_constraints.get_mut(name))
-            .or_else(|| self.globals_assigned.get_mut(name))
-            .or_else(|| self.globals_assumed.get_mut(name))
+            .find_map(|s| s.variables.get_mut(&name))
+            .or_else(|| self.globals_assigned.get_mut(&name))
+            .or_else(|| self.globals_assumed.get_mut(&name))
+        {
+            let res = *existing;
+            *existing = typevar;
+            Some(res)
+        } else {
+            self.declare_global(name, typevar);
+            None
+        }
     }
 
     /// If the given name is in scope,
     /// removes it from the innermost subscope,
     /// and returns the constraints.
-    pub fn remove(&mut self, name: &str) -> Option<ConstraintSet> {
+    pub fn remove(&mut self, name: &str) -> Option<TypeVar> {
         // self.subscopes.iter_mut().rev().find_map(|s| s.remove(name))
         self.subscopes
             .tail
             .iter_mut()
             .rev()
             .chain(iter::once(&mut self.subscopes.head))
-            .find_map(|s| s.variable_constraints.remove(name))
+            .find_map(|s| s.variables.remove(name))
     }
 
     /// If the current subscope is from a variadic function (or the top level scope),
@@ -157,12 +152,9 @@ impl Scope {
     }
 }
 
-impl Extend<String> for Scope {
-    fn extend<T: IntoIterator<Item = String>>(&mut self, iter: T) {
-        self.subscopes
-            .last_mut()
-            .variable_constraints
-            .extend(iter.into_iter().zip(iter::repeat(ConstraintSet::default())))
+impl Extend<(String, TypeVar)> for Scope {
+    fn extend<T: IntoIterator<Item = (String, TypeVar)>>(&mut self, iter: T) {
+        self.subscopes.last_mut().variables.extend(iter)
     }
 }
 
@@ -173,17 +165,17 @@ impl Display for Scope {
             "{{{}}}",
             self.globals_assigned
                 .iter()
-                .map(|(name, constraints)| format!("{name}: {constraints}"))
+                .map(|(name, typevar)| format!("{name}: {typevar:?}"))
                 .chain(
                     self.globals_assumed
                         .iter()
-                        .map(|(name, constraints)| format!("(assumed) {name}: {constraints}"))
+                        .map(|(name, typevar)| format!("(assumed) {name}: {typevar:?}"))
                 )
                 .chain(
                     self.subscopes
                         .iter()
-                        .flat_map(|sub| &sub.variable_constraints)
-                        .map(|(name, constraints)| format!("local {name}: {constraints}"))
+                        .flat_map(|sub| &sub.variables)
+                        .map(|(name, typevar)| format!("local {name}: {typevar:?}"))
                 )
                 .join(", ")
         )
