@@ -1,14 +1,3 @@
-function add(a, b)
-    return a + b + some_global
-end
-
-local foo
-if USE_STRING then
-    foo = "string"
-else
-    foo = 123
-end
-
 local hours = {
     [0] = "twelve",
     "one",

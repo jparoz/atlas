@@ -59,12 +59,15 @@ function either(y)
     if type(y) == "number" then
         -- {y: [number]}, {out: []}
         out = "banana"
+        ;
         -- {y: [number]}, {out: [string]}
     elseif type(y) == "string" then
         -- {y: [string]}, {out: []}
         out = 123
+        ;
         -- {y: [string]}, {out: [number]}
     end
+    ;
     -- {y: [number, string]}, {out: [string, number]}
     return out
 end
