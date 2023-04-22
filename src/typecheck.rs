@@ -792,7 +792,7 @@ impl<'a> ChunkBuilder<'a> {
 
                     // string
                     ".." => {
-                        let string_typevar = self.typechecker.fresh_constrain(Type::Number.into());
+                        let string_typevar = self.typechecker.fresh_constrain(Type::String.into());
                         let string_explist = explist![string_typevar];
                         self.constrain_node(left, &string_explist);
                         self.constrain_node(right, &string_explist);
