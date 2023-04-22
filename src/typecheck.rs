@@ -746,11 +746,15 @@ impl<'a> ChunkBuilder<'a> {
                 let left = expr.child_by_field_name("left").expect("non-optional");
                 let right = expr.child_by_field_name("right").expect("non-optional");
 
+                let left_explist = self.typecheck_expression(left);
+                let right_explist = self.typecheck_expression(right);
+
                 match &self.src[operator.byte_range()] {
                     // number
                     "+" | "-" | "*" | "//" | "%" => {
                         let num_typevar = self.typechecker.fresh_constrain(Type::Number.into());
                         let num_explist = explist![num_typevar];
+
                         self.constrain_node(left, &num_explist);
                         self.constrain_node(right, &num_explist);
                         num_explist
@@ -772,8 +776,6 @@ impl<'a> ChunkBuilder<'a> {
                         // Might want to do some analysis to work out
                         // which type is more general or something,
                         // and constrain only in one direction.
-                        let left_explist = self.typecheck_expression(left);
-                        let right_explist = self.typecheck_expression(right);
                         self.constrain_node(left, &right_explist);
                         self.constrain_node(right, &left_explist);
 
@@ -808,12 +810,6 @@ impl<'a> ChunkBuilder<'a> {
                     // `aBool and aNumber or aString` as `number | string`,
                     // rather than the current `boolean | number | string`.
                     "or" | "and" => {
-                        let left = expr.child_by_field_name("left").expect("non-optional");
-                        let right = expr.child_by_field_name("right").expect("non-optional");
-
-                        let left_explist = self.typecheck_expression(left);
-                        let right_explist = self.typecheck_expression(right);
-
                         let left_constraints = self.typechecker.get(left_explist.0[0]);
                         let right_constraints = self.typechecker.get(right_explist.0[0]);
 
