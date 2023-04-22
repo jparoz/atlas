@@ -70,7 +70,7 @@ impl Typechecker {
                 node_types: HashMap::new(),
             };
 
-            let mut return_type = builder.typecheck_block(tree.root_node());
+            let return_type = builder.typecheck_block(tree.root_node());
 
             let ChunkBuilder {
                 src,
