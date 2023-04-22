@@ -70,7 +70,7 @@ impl Typechecker {
                 node_types: HashMap::new(),
             };
 
-            let return_type = builder.typecheck_block(tree.root_node());
+            let mut return_type = builder.typecheck_block(tree.root_node());
 
             let ChunkBuilder {
                 src,
@@ -134,7 +134,12 @@ impl Typechecker {
     }
 
     /// Combines the constraints of two [`ExpList`]s.
-    fn combine(&mut self, explist: &ExpList, other: &ExpList) {
+    fn combine(&mut self, explist: &mut ExpList, other: &ExpList) {
+        // Resize `explist` so that it's at least as long as `other`
+        if explist.0.len() < other.0.len() {
+            explist.0.resize(other.0.len(), self.fresh());
+        }
+
         // For each item in the lists (item-wise),
         // extend the set in `explist` with the new constraints from `other`.
         for (existing_typevar, new_typevar) in
@@ -315,7 +320,7 @@ impl<'a> ChunkBuilder<'a> {
     /// Builds the type environment in a block.
     /// Returns a list of all the possible return types of the block.
     fn typecheck_block(&mut self, block: Node) -> ExpList {
-        let return_type = ExpList::default();
+        let mut return_type = ExpList::default();
 
         // For each statement,
         // build the type environment at that point.
@@ -371,7 +376,7 @@ impl<'a> ChunkBuilder<'a> {
 
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -390,7 +395,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -402,7 +407,7 @@ impl<'a> ChunkBuilder<'a> {
                     // repeat
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
                     }
 
                     // until
@@ -438,24 +443,24 @@ impl<'a> ChunkBuilder<'a> {
                     let start_node = statement
                         .child_by_field_name("start")
                         .expect("non-optional");
-                    let start_explist = self.typecheck_expression(start_node);
-                    self.typechecker.combine(&start_explist, &num_explist);
+                    let mut start_explist = self.typecheck_expression(start_node);
+                    self.typechecker.combine(&mut start_explist, &num_explist);
 
                     // end
                     let end_node = statement.child_by_field_name("end").expect("non-optional");
-                    let end_explist = self.typecheck_expression(end_node);
-                    self.typechecker.combine(&end_explist, &num_explist);
+                    let mut end_explist = self.typecheck_expression(end_node);
+                    self.typechecker.combine(&mut end_explist, &num_explist);
 
                     // [step]
                     if let Some(step_node) = statement.child_by_field_name("step") {
-                        let step_explist = self.typecheck_expression(step_node);
-                        self.typechecker.combine(&step_explist, &num_explist);
+                        let mut step_explist = self.typecheck_expression(step_node);
+                        self.typechecker.combine(&mut step_explist, &num_explist);
                     }
 
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -507,7 +512,7 @@ impl<'a> ChunkBuilder<'a> {
                     // do
                     if let Some(body) = statement.child_by_field_name("body") {
                         let return_list = self.typecheck_block(body);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
                     }
 
                     self.scope.close_scope();
@@ -531,7 +536,7 @@ impl<'a> ChunkBuilder<'a> {
                         self.scope.open_scope();
 
                         let return_list = self.typecheck_block(consequence);
-                        self.typechecker.combine(&return_type, &return_list);
+                        self.typechecker.combine(&mut return_type, &return_list);
 
                         self.scope.close_scope();
                     }
@@ -549,7 +554,7 @@ impl<'a> ChunkBuilder<'a> {
                                 self.scope.open_scope();
 
                                 let return_list = self.typecheck_block(consequence);
-                                self.typechecker.combine(&return_type, &return_list);
+                                self.typechecker.combine(&mut return_type, &return_list);
 
                                 self.scope.close_scope();
                             }
@@ -558,7 +563,7 @@ impl<'a> ChunkBuilder<'a> {
                             self.scope.open_scope();
 
                             let return_list = self.typecheck_block(body);
-                            self.typechecker.combine(&return_type, &return_list);
+                            self.typechecker.combine(&mut return_type, &return_list);
 
                             self.scope.close_scope();
                         }
@@ -614,7 +619,7 @@ impl<'a> ChunkBuilder<'a> {
                         self.typechecker.constrain(nil_typevar, Type::Nil.into());
                         ExpList(vec![nil_typevar])
                     };
-                    self.typechecker.combine(&return_type, &return_list);
+                    self.typechecker.combine(&mut return_type, &return_list);
 
                     break;
                 }
