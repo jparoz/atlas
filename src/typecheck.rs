@@ -120,20 +120,20 @@ impl Typechecker {
     }
 
     /// Gets the type constraints corresponding to the given [`TypeVar`].
-    fn get(&self, var: TypeVar) -> &ConstraintSet {
+    pub fn get(&self, var: TypeVar) -> &ConstraintSet {
         self.typevars
             .get(var.0)
             .expect("all TypeVars in existence should have been added to the mapping")
     }
 
     /// Gets a mutable reference to the type constraints corresponding to the given [`TypeVar`].
-    fn get_mut(&mut self, var: TypeVar) -> &mut ConstraintSet {
+    pub fn get_mut(&mut self, var: TypeVar) -> &mut ConstraintSet {
         self.typevars
             .get_mut(var.0)
             .expect("all TypeVars in existence should have been added to the mapping")
     }
 
-    /// Combines the constraints of two `ExpList`s.
+    /// Combines the constraints of two [`ExpList`]s.
     fn combine(&mut self, explist: &ExpList, other: &ExpList) {
         // For each item in the lists (item-wise),
         // extend the set in `explist` with the new constraints from `other`.
@@ -143,6 +143,95 @@ impl Typechecker {
             let new_constraints = self.get(new_typevar).clone();
             let existing_constraints = self.get_mut(existing_typevar);
             existing_constraints.0.extend(new_constraints.0);
+        }
+    }
+
+    // Formatting methods
+
+    /// Formats a [`Type`] for display to the user.
+    // @Todo: This could return a struct which implements Display,
+    // instead of allocating a String;
+    // see std::path::Path::display for an example.
+    pub fn format_type(&self, typ: &Type) -> String {
+        use Type::*;
+        match typ {
+            Nil => "nil".to_string(),
+            Boolean => "boolean".to_string(),
+            Number => "number".to_string(),
+            String => "string".to_string(),
+
+            LightUserdata | FullUserdata => "userdata".to_string(),
+
+            // Parametric types
+            Function { arguments, returns } => {
+                format!(
+                    "(({}) -> {})",
+                    self.format_explist(arguments),
+                    self.format_explist(returns)
+                )
+            }
+
+            Thread => "thread".to_string(),
+            Table => "table".to_string(),
+
+            // Pseudo-types
+            Uninitialized => "uninitialized (nil)".to_string(),
+            Unknown => "unknown".to_string(),
+        }
+    }
+
+    /// Formats a [`Constraint`] for display to the user.
+    // @Todo: This could return a struct which implements Display,
+    // instead of allocating a String;
+    // see std::path::Path::display for an example.
+    pub fn format_constraint(&self, constraint: &Constraint) -> String {
+        use Constraint::*;
+        match constraint {
+            IsType(typ) => self.format_type(typ),
+            And(constraints) => constraints
+                .iter()
+                .map(|cons| self.format_constraint(cons))
+                .join(" & "),
+            Or(constraints) => constraints
+                .iter()
+                .map(|cons| self.format_constraint(cons))
+                .join(" | "),
+        }
+    }
+
+    /// Formats a [`ConstraintSet`] for display to the user.
+    // @Todo: This could return a struct which implements Display,
+    // instead of allocating a String;
+    // see std::path::Path::display for an example.
+    pub fn format_constraint_set(&self, constraint_set: &ConstraintSet) -> String {
+        if constraint_set.0.is_empty() {
+            // @Cleanup: Is this the best spot for this logic?
+            // Feels a bit wrong to have this be in the Display impl.
+            "any".to_string()
+        } else {
+            constraint_set
+                .0
+                .iter()
+                .map(|cons| self.format_constraint(cons))
+                .join(" & ")
+        }
+    }
+
+    /// Formats an [`ExpList`] for display to the user.
+    // @Todo: This could return a struct which implements Display,
+    // instead of allocating a String;
+    // see std::path::Path::display for an example.
+    pub fn format_explist(&self, explist: &ExpList) -> String {
+        // @Cleanup: Is this the best spot for this "nil" logic?
+        // Feels a bit wrong to have this be in the formatting methods.
+        if explist.0.is_empty() {
+            "nil".to_string()
+        } else {
+            explist
+                .0
+                .iter()
+                .map(|typevar| self.format_constraint_set(self.get(*typevar)))
+                .join(", ")
         }
     }
 }
@@ -233,7 +322,7 @@ impl<'a> ChunkBuilder<'a> {
         let mut cursor = block.walk();
         for statement in block.named_children(&mut cursor) {
             // Save the current state of the type environment.
-            log::trace!("scope:\n{}", self.scope);
+            log::trace!("scope:\n{}", self.typechecker.format_scope(&self.scope));
             self.scopes.insert(statement.id(), self.scope.clone());
 
             log::trace!(
@@ -538,7 +627,10 @@ impl<'a> ChunkBuilder<'a> {
             }
         }
 
-        log::trace!("Block return type: {return_type:?}");
+        log::trace!(
+            "Block return type: {}",
+            self.typechecker.format_explist(&return_type)
+        );
 
         return_type
     }
@@ -804,7 +896,7 @@ impl<'a> ChunkBuilder<'a> {
         self.scope.close_scope();
 
         let typ = Type::Function { arguments, returns };
-        log::trace!("Function has type: {typ}");
+        log::trace!("Function has type: {}", self.typechecker.format_type(&typ));
         typ
     }
 
@@ -936,32 +1028,6 @@ pub enum Type {
     Unknown,
 }
 
-impl Display for Type {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Type::*;
-        match self {
-            Nil => write!(f, "nil"),
-            Boolean => write!(f, "boolean"),
-            Number => write!(f, "number"),
-            String => write!(f, "string"),
-
-            LightUserdata | FullUserdata => write!(f, "userdata"),
-
-            // Parametric types
-            Function { arguments, returns } => {
-                write!(f, "(({arguments:?}) -> {returns:?})")
-            }
-
-            Thread => write!(f, "thread"),
-            Table => write!(f, "table"),
-
-            // Pseudo-types
-            Uninitialized => write!(f, "uninitialized (nil)"),
-            Unknown => write!(f, "unknown"),
-        }
-    }
-}
-
 /// An `ExpList` represents a Lua explist,
 /// e.g. a multiple return or varargs expression.
 #[derive(Debug, Default, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
@@ -989,17 +1055,6 @@ pub enum Constraint {
     And(Vec<Constraint>),
 }
 
-impl Display for Constraint {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        use Constraint::*;
-        match self {
-            IsType(typ) => typ.fmt(f),
-            And(constraints) => write!(f, "{}", constraints.iter().join(" & ")),
-            Or(constraints) => write!(f, "{}", constraints.iter().join(" | ")),
-        }
-    }
-}
-
 impl From<Type> for Constraint {
     fn from(typ: Type) -> Self {
         Constraint::IsType(typ)
@@ -1012,17 +1067,5 @@ pub struct ConstraintSet(HashSet<Constraint>);
 impl From<Type> for ConstraintSet {
     fn from(typ: Type) -> Self {
         ConstraintSet(im::hashset! {typ.into()})
-    }
-}
-
-impl Display for ConstraintSet {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        if self.0.is_empty() {
-            // @Cleanup: Is this the best spot for this logic?
-            // Feels a bit wrong to have this be in the Display impl.
-            write!(f, "any")
-        } else {
-            write!(f, "{}", self.0.iter().join(" & "))
-        }
     }
 }

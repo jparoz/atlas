@@ -7,7 +7,7 @@ use im::HashMap;
 use itertools::Itertools;
 use nonempty::{nonempty, NonEmpty};
 
-use crate::typecheck::{ExpList, TypeVar};
+use crate::typecheck::{ExpList, TypeVar, Typechecker};
 
 /// Represents the type environment at a particular point in a chunk.
 #[derive(Debug, Default, Clone)]
@@ -158,25 +158,27 @@ impl Extend<(String, TypeVar)> for Scope {
     }
 }
 
-impl Display for Scope {
-    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
-        write!(
-            f,
+impl Typechecker {
+    pub fn format_scope(&self, scope: &Scope) -> String {
+        format!(
             "{{{}}}",
-            self.globals_assigned
+            scope
+                .globals_assigned
                 .iter()
-                .map(|(name, typevar)| format!("{name}: {typevar:?}"))
-                .chain(
-                    self.globals_assumed
-                        .iter()
-                        .map(|(name, typevar)| format!("(assumed) {name}: {typevar:?}"))
-                )
-                .chain(
-                    self.subscopes
-                        .iter()
-                        .flat_map(|sub| &sub.variables)
-                        .map(|(name, typevar)| format!("local {name}: {typevar:?}"))
-                )
+                .map(|(name, typevar)| format!(
+                    "{name}: {}",
+                    self.format_constraint_set(self.get(*typevar))
+                ))
+                .chain(scope.globals_assumed.iter().map(|(name, typevar)| format!(
+                    "(assumed) {name}: {}",
+                    self.format_constraint_set(self.get(*typevar))
+                )))
+                .chain(scope.subscopes.iter().flat_map(|sub| &sub.variables).map(
+                    |(name, typevar)| format!(
+                        "local {name}: {}",
+                        self.format_constraint_set(self.get(*typevar))
+                    )
+                ))
                 .join(", ")
         )
     }
