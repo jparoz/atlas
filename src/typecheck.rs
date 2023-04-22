@@ -943,12 +943,14 @@ impl<'a> ChunkBuilder<'a> {
         // if it is indeed a variable.
         match expr.kind() {
             "variable" => {
-                let typevar = self.typechecker.fresh();
-
                 let var = &self.src[expr.byte_range()];
-                if !self.scope.contains_key(var) {
+                let typevar = if let Some(typevar) = self.scope.get(var) {
+                    typevar
+                } else {
+                    let typevar = self.typechecker.fresh();
                     self.scope.assume_global(var.to_string(), typevar);
-                }
+                    typevar
+                };
 
                 let constraints = self.typechecker.get(explist.0[0]);
                 self.typechecker.constrain(typevar, constraints.clone());
