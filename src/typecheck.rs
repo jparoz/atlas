@@ -801,27 +801,12 @@ impl<'a> ChunkBuilder<'a> {
 
                     // short-circuiting
                     //
-                    // @Note @Fixme:
-                    // These are the expressions
-                    // (along with function calls)
-                    // which mess up the idea that an expression can only have one possible type.
-                    //
-                    // For simplicity,
-                    // for the moment,
-                    // instead of capturing the possibility within an `or` expression
-                    // of having two different types,
-                    // we'll simply type the whole `or` expression
-                    // as having the same type as its second operand;
-                    // and do the same for `and`.
-                    //
-                    // That is,
-                    // the expression `foo or 123`
-                    // is given the type `number`;
-                    // even though a more precise type would be `type(foo) | number`.
-                    // `foo and 123` is given the same type `number`.
-                    //
-                    // This is essentially arbitrary,
-                    // but it's at least sometimes right.
+                    // @Todo @Refinement:
+                    // The type of `aBool or aString` is `true | string`;
+                    // The type of `aBool and aString` is `false | string`.
+                    // We can use this to more sensibly type the idiom
+                    // `aBool and aNumber or aString` as `number | string`,
+                    // rather than the current `boolean | number | string`.
                     "or" | "and" => {
                         let left = expr.child_by_field_name("left").expect("non-optional");
                         let right = expr.child_by_field_name("right").expect("non-optional");
