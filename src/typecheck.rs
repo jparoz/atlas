@@ -337,14 +337,6 @@ impl<'a> ChunkBuilder<'a> {
             );
 
             match statement.kind() {
-                // @Todo: transitive type constraints somehow, e.g.:
-                //     function Foobar(a)
-                //         local b = a
-                //         local res = b + 1
-                //         return res
-                //     end
-                // should constrain `a` to be type `number`,
-                // but it only constrains `b` (which is internal to the function).
                 "variable_assignment" => {
                     // @Todo: Handle table variables (table.field and table[index]),
                     // either here or in self.assign
@@ -422,8 +414,6 @@ impl<'a> ChunkBuilder<'a> {
 
                 // for name = start, end [, step] do [body] end
                 "for_numeric_statement" => {
-                    // This is effectively a constant.
-                    // @Todo @Cleanup: reuse the same typevars for types of literals
                     let num_typevar = self.typechecker.fresh();
                     self.typechecker.constrain(num_typevar, Type::Number.into());
                     let num_explist = ExpList(vec![num_typevar]);
@@ -613,8 +603,6 @@ impl<'a> ChunkBuilder<'a> {
                         self.explist(explist_node)
                     } else {
                         // `return;` means `return nil;`
-                        // This is effectively a constant.
-                        // @Todo @Cleanup: reuse the same typevars for types of literals
                         let nil_typevar = self.typechecker.fresh();
                         self.typechecker.constrain(nil_typevar, Type::Nil.into());
                         ExpList(vec![nil_typevar])
